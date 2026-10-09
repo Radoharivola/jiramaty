@@ -10,13 +10,15 @@ config_version=5
 
 [application]
 
-config/name="jiramaty"
+config/name="JIRAMATY"
 run/main_scene="uid://bjjp1tnv1p0gw"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 config/icon="res://icon.svg"
 
 [display]
 
+window/size/viewport_width=720
+window/size/viewport_height=1280
 window/stretch/mode="canvas_items"
 
 [dotnet]

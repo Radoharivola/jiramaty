@@ -1,164 +1,1430 @@
 extends Node2D
 
-# Prototype: Délestage Chaos
-# Tap a neighborhood to cut or restore its power.
-# Supply is always lower than total demand. Keep every riot meter below 100
-# and don't overload the grid. Score = seconds survived.
+## A small, self-contained utility management game. All interface elements are
+## drawn here so the prototype stays lightweight and works with mouse or touch.
 
-class Hood:
-	var hood_name: String = ""
-	var pos: Vector2 = Vector2.ZERO  # fractions of the screen size
-	var demand: float = 30.0
-	var powered: bool = true
-	var riot: float = 0.0
-	var radius: float = 70.0
+class District:
+	var title: String
+	var latitude: float
+	var longitude: float
+	var demand_power: float
+	var demand_water: float
+	var has_power := true
+	var has_water := true
+	var unrest := 0.0
+	var issue := ""
+	var illegal_hookup := false
+	var unpaid := false
+	var arrears := 0
+	var houses: Array = []
+	var repair_left := 0.0
+	var repairing := false
 
-var hoods: Array = []
-var supply: float = 0.0
-var powered_demand: float = 0.0
-var overload: float = 0.0
-var time_alive: float = 0.0
-var best_time: float = 0.0
-var game_over: bool = false
-var reason: String = ""
+
+class House:
+	var label: String
+	var offset := Vector2.ZERO
+	var has_power := true
+	var has_water := true
+	var unpaid := false
+	var illegal_hookup := false
+	var arrears := 0
+
+
+class Facility:
+	var title: String
+	var kind: String
+	var fuel_type: String
+	var latitude: float
+	var longitude: float
+	var capacity: float
+	var display_offset := Vector2.ZERO
+	var fault := false
+	var repair_left := 0.0
+	var repairing := false
+	var fault_name := ""
+
+const DISTRICT_DATA := [
+	["Analakely", -18.90832, 47.52629, 28.0, 23.0],
+	["Ankorondrano", -18.88597, 47.52292, 35.0, 28.0],
+	["Andavamamba", -18.91822, 47.50810, 22.0, 20.0],
+	["Itaosy", -18.91667, 47.46667, 25.0, 22.0],
+	["Isotry", -18.90995, 47.51615, 26.0, 24.0],
+	["Tanjombato", -18.95826, 47.52566, 24.0, 21.0],
+]
+
+# Public site markers use approximate coordinates. The RIA diesel fleet is a
+# gameplay aggregate; household positions and account states are fictional.
+const FACILITY_DATA := [
+	["Andekaleka Hydro", "power", "hydro", -18.79401, 48.61925, 42.0],
+	["Ambohimanambola HFO", "power", "hfo", -18.94967, 47.61529, 34.0],
+	["Antelomita Hydro", "power", "hydro", -19.01198, 47.70334, 9.0],
+	["Mandroseza Water Works", "water", "water", -18.93333, 47.55000, 40.0],
+	["Faralaza Water Station", "water", "water", -18.86000, 47.47000, 12.0],
+	["Vontovorona Water Station", "water", "water", -18.97000, 47.45000, 10.0],
+	["Mandroseza HFO Plant", "power", "hfo", -18.93333, 47.55000, 22.0],
+	["RIA Diesel Backup Fleet", "power", "diesel", -18.91000, 47.53000, 12.0],
+	["Ambatolampy Solar", "power", "solar", -19.48900, 47.44500, 8.0],
+]
+
+const MAP_CENTER_LAT := -18.91
+const MAP_CENTER_LON := 47.53
+
+const INK := Color("#213733")
+const MUTED := Color("#6f8178")
+const BG := Color("#edf1e7")
+const PANEL := Color("#fffdf7")
+const PANEL_HI := Color("#e5f1e9")
+const TEAL := Color("#24836d")
+const AMBER := Color("#e9a056")
+const RED := Color("#d95e57")
+
 var font: Font
+var districts: Array[District] = []
+var facilities: Array[Facility] = []
+var selected := 0
+var selected_house := -1
+var selected_facility := -1
+var zoom_level := 0
+var map_pan := Vector2.ZERO
+var crew_level := 1
+var crew_cooldown := 0.0
+var map_drag_active := false
+var last_drag_position := Vector2.ZERO
+var active_touches: Dictionary = {}
+var pinch_distance := 0.0
+var power_supply := 0.0
+var water_supply := 0.0
+var power_used := 0.0
+var water_used := 0.0
+var reservoir := 78.0
+var diesel_stock := 1200.0
+var diesel_tank_capacity := 12000.0
+var diesel_monthly_plan := 3000
+var diesel_frequency_days := 10
+var diesel_auto_purchase := true
+var diesel_days_elapsed := 0.0
+var diesel_next_order_day := 10.0
+var diesel_truck_in_transit := false
+var diesel_truck_eta := 0.0
+var diesel_truck_liters := 0.0
+var diesel_retry_timer := 0.0
+var diesel_panel_open := false
+var is_raining := false
+var rain_remaining := 0.0
+var weather_clock := 0.0
+var next_rain_time := 32.0
+var rain_popup_open := false
+var rain_popup_seen := false
+var treasury := 600.0
+var loan_used := false
+var time_alive := 0.0
+var event_clock := 0.0
+var income_clock := 0.0
+var best_time := 0.0
+var game_started := false
+var game_over := false
+var help_open := false
+var show_more_actions := false
+var reason := ""
+var notice := "Dispatch ready. Keep the lights on... somewhere."
+var notice_timer := 0.0
+var hitboxes: Dictionary = {}
 
 
 func _ready() -> void:
 	randomize()
 	font = ThemeDB.fallback_font
+	_load_best()
 	_reset()
 
 
+func _load_best() -> void:
+	var save := ConfigFile.new()
+	if save.load("user://jiramaty.cfg") == OK:
+		best_time = float(save.get_value("scores", "best_time", 0.0))
+
+
+func _save_best() -> void:
+	var save := ConfigFile.new()
+	save.set_value("scores", "best_time", best_time)
+	save.save("user://jiramaty.cfg")
+
+
 func _reset() -> void:
-	hoods.clear()
-	var data: Array = [
-		["Analakely", Vector2(0.30, 0.22), 32.0],
-		["Ankorondrano", Vector2(0.72, 0.30), 40.0],
-		["Ambohidratrimo", Vector2(0.25, 0.50), 24.0],
-		["Itaosy", Vector2(0.70, 0.58), 28.0],
-		["Isotry", Vector2(0.45, 0.78), 30.0],
-	]
-	for d in data:
-		var h := Hood.new()
-		h.hood_name = d[0]
-		h.pos = d[1]
-		h.demand = d[2]
-		hoods.append(h)
-	supply = 0.0
-	powered_demand = 0.0
-	overload = 0.0
+	districts.clear()
+	for row in DISTRICT_DATA:
+		var d := District.new()
+		d.title = row[0]
+		d.latitude = row[1]
+		d.longitude = row[2]
+		d.demand_power = row[3]
+		d.demand_water = row[4]
+		_create_houses(d)
+		districts.append(d)
+	facilities.clear()
+	for row in FACILITY_DATA:
+		var facility := Facility.new()
+		facility.title = row[0]
+		facility.kind = row[1]
+		facility.fuel_type = row[2]
+		facility.latitude = row[3]
+		facility.longitude = row[4]
+		facility.capacity = row[5]
+		if facility.title == "Mandroseza Water Works":
+			facility.display_offset = Vector2(13, -4)
+		elif facility.title == "Mandroseza HFO Plant":
+			facility.display_offset = Vector2(-13, 4)
+		elif facility.title == "RIA Diesel Backup Fleet":
+			facility.display_offset = Vector2(40, -18)
+		facilities.append(facility)
+	selected = -1
+	selected_house = -1
+	selected_facility = -1
+	zoom_level = 0
+	map_pan = Vector2.ZERO
+	crew_level = 1
+	crew_cooldown = 0.0
+	map_drag_active = false
+	active_touches.clear()
+	pinch_distance = 0.0
+	power_supply = 0.0
+	water_supply = 0.0
+	power_used = 0.0
+	water_used = 0.0
+	reservoir = 78.0
+	diesel_stock = 1200.0
+	diesel_tank_capacity = 12000.0
+	diesel_monthly_plan = 3000
+	diesel_frequency_days = 10
+	diesel_auto_purchase = true
+	diesel_days_elapsed = 0.0
+	diesel_next_order_day = 10.0
+	diesel_truck_in_transit = false
+	diesel_truck_eta = 0.0
+	diesel_truck_liters = 0.0
+	diesel_retry_timer = 0.0
+	diesel_panel_open = false
+	is_raining = false
+	rain_remaining = 0.0
+	weather_clock = 0.0
+	next_rain_time = randf_range(26.0, 42.0)
+	rain_popup_open = false
+	rain_popup_seen = false
+	treasury = 600.0
+	loan_used = false
 	time_alive = 0.0
+	event_clock = 0.0
+	income_clock = 0.0
 	game_over = false
+	game_started = false
+	help_open = false
+	show_more_actions = false
 	reason = ""
+	notice = ""
+	notice_timer = 0.0
+	_recalculate_supply()
 	queue_redraw()
+
+
+func _create_houses(d: District) -> void:
+	var index := 0
+	for row in range(5):
+		for col in range(5):
+			index += 1
+			var house := House.new()
+			house.label = "House " + ("%02d" % index)
+			house.offset = Vector2((col - 2) * 0.00095 + (0.0003 if row % 2 == 0 else 0.0), (row - 2) * 0.00095)
+			house.unpaid = index in [4, 13, 21]
+			house.arrears = 2 if house.unpaid else 0
+			house.illegal_hookup = index == 17
+			d.houses.append(house)
+
+
+func _begin_shift() -> void:
+	game_started = true
+	help_open = false
+	selected = -1
+	show_more_actions = false
+	time_alive = 0.0
+	event_clock = 0.0
+	income_clock = 0.0
+	notice = "Tap a neighborhood to check its services."
+	notice_timer = 6.0
+	queue_redraw()
+
+
+func _recalculate_supply() -> void:
+	var total_power := 0.0
+	var total_water := 0.0
+	var available_power := 0.0
+	var available_water := 0.0
+	var demand_power := 0.0
+	var demand_water := 0.0
+	for facility in facilities:
+		if facility.kind == "power":
+			total_power += facility.capacity
+			if not facility.fault:
+				if facility.fuel_type == "diesel":
+					available_power += facility.capacity * clampf(diesel_stock / 1000.0, 0.0, 1.0)
+				elif facility.fuel_type == "solar":
+					available_power += facility.capacity * (0.65 + 0.35 * maxf(0.0, sin(time_alive / 28.0)))
+				else:
+					available_power += facility.capacity
+		else:
+			total_water += facility.capacity
+			if not facility.fault:
+				available_water += facility.capacity
+	for d in districts:
+		demand_power += d.demand_power
+		demand_water += d.demand_water
+	power_supply = demand_power * (0.81 + 0.025 * sin(time_alive * 0.35)) * available_power / maxf(total_power, 1.0)
+	water_supply = minf(demand_water * 0.86 * available_water / maxf(total_water, 1.0), reservoir * 1.15)
+
+
+func _diesel_order_size() -> float:
+	var deliveries_per_month := maxf(1.0, ceil(30.0 / float(diesel_frequency_days)))
+	return float(diesel_monthly_plan) / deliveries_per_month
+
+
+func _dispatch_diesel_order(liters: float, automatic: bool) -> bool:
+	if diesel_truck_in_transit:
+		if not automatic:
+			notice = "The fuel truck is already on the road."
+		return false
+	var order_liters := minf(liters, diesel_tank_capacity - diesel_stock)
+	if order_liters < 1.0:
+		if not automatic:
+			notice = "Diesel tanks are already full."
+		return false
+	var cost := order_liters * 0.12
+	if treasury < cost:
+		if not automatic:
+			notice = "That delivery costs $" + str(int(cost)) + ". The treasury is short."
+		return false
+	treasury -= cost
+	diesel_truck_liters = order_liters
+	diesel_truck_eta = 18.0
+	diesel_truck_in_transit = true
+	if not automatic:
+		diesel_next_order_day = diesel_days_elapsed + float(diesel_frequency_days)
+	diesel_retry_timer = 0.0
+	notice = "Diesel ordered: " + str(int(order_liters)) + " L. The tanker is on its way."
+	notice_timer = 5.0
+	return true
+
+
+func _update_weather(delta: float) -> void:
+	if is_raining:
+		rain_remaining = maxf(0.0, rain_remaining - delta)
+		if rain_remaining <= 0.0:
+			is_raining = false
+			weather_clock = 0.0
+			rain_popup_seen = false
+	else:
+		weather_clock += delta
+		if weather_clock >= next_rain_time:
+			is_raining = true
+			rain_remaining = 18.0
+			rain_popup_seen = false
+			next_rain_time = randf_range(50.0, 75.0)
+			notice = "Rain is falling over the network."
+			notice_timer = 5.0
+	if is_raining and not rain_popup_seen and not diesel_panel_open:
+		rain_popup_open = true
 
 
 func _process(delta: float) -> void:
-	if game_over:
+	if not game_started or game_over:
 		return
-
 	time_alive += delta
+	event_clock += delta
+	income_clock += delta
+	diesel_days_elapsed += delta / 6.0
+	notice_timer = maxf(0.0, notice_timer - delta)
+	_update_weather(delta)
+	if diesel_truck_in_transit:
+		diesel_truck_eta = maxf(0.0, diesel_truck_eta - delta)
+		if diesel_truck_eta <= 0.0:
+			diesel_stock = minf(diesel_tank_capacity, diesel_stock + diesel_truck_liters)
+			diesel_truck_in_transit = false
+			diesel_truck_liters = 0.0
+			notice = "Diesel tanker arrived. Reserve: " + str(int(diesel_stock)) + " L."
+			notice_timer = 5.0
+	if diesel_auto_purchase and diesel_days_elapsed >= diesel_next_order_day:
+		diesel_retry_timer = maxf(0.0, diesel_retry_timer - delta)
+		if diesel_retry_timer <= 0.0:
+			if _dispatch_diesel_order(_diesel_order_size(), true):
+				diesel_next_order_day += float(diesel_frequency_days)
+			else:
+				diesel_retry_timer = 6.0
+	for d in districts:
+		d.demand_power = clampf(d.demand_power + randf_range(-1.3, 1.3) * delta, 14.0, 46.0)
+		d.demand_water = clampf(d.demand_water + randf_range(-0.9, 0.9) * delta, 12.0, 38.0)
+	for facility in facilities:
+		if facility.repairing:
+			facility.repair_left = maxf(0.0, facility.repair_left - delta)
+			if facility.repair_left <= 0.0:
+				facility.repairing = false
+				facility.fault = false
+				notice = facility.title + " is back online."
+				notice_timer = 5.0
+	for d in districts:
+		if d.repairing:
+			d.repair_left = maxf(0.0, d.repair_left - delta)
+			if d.repair_left <= 0.0:
+				d.repairing = false
+				var fixed_issue := d.issue
+				d.issue = ""
+				if fixed_issue in ["Transformer fault", "Copper theft"]:
+					d.has_power = true
+					for house in d.houses:
+						house.has_power = true
+				if fixed_issue == "Main pipe leak":
+					d.has_water = true
+					for house in d.houses:
+						house.has_water = true
+				notice = fixed_issue + " repaired in " + d.title + "."
+				notice_timer = 5.0
+	crew_cooldown = maxf(0.0, crew_cooldown - delta)
+	_recalculate_supply()
+	power_used = 0.0
+	water_used = 0.0
+	for d in districts:
+		if d.has_power:
+			for house in d.houses:
+				if house.has_power:
+					power_used += d.demand_power / d.houses.size() * (1.3 if house.illegal_hookup else 1.0)
+		if d.has_water:
+			for house in d.houses:
+				if house.has_water:
+					water_used += d.demand_water / d.houses.size()
 
-	# Demand drifts randomly so the player keeps having to re-decide.
-	var total_demand: float = 0.0
-	for h in hoods:
-		h.demand = clampf(h.demand + randf_range(-6.0, 6.0) * delta, 15.0, 50.0)
-		total_demand += h.demand
-
-	# Supply is always about 60% of demand, with a slow wobble.
-	supply = total_demand * 0.6 * (1.0 + 0.08 * sin(time_alive * 0.6))
-
-	powered_demand = 0.0
-	for h in hoods:
-		if h.powered:
-			powered_demand += h.demand
-
-	# Grid overload.
-	if powered_demand > supply:
-		overload += ((powered_demand - supply) / supply) * 60.0 * delta
-	else:
-		overload = maxf(0.0, overload - 15.0 * delta)
-
-	if overload >= 100.0:
-		overload = 100.0
-		_end_game("Grid collapse: total blackout")
-		return
-
-	# Riot meters.
-	for h in hoods:
-		if h.powered:
-			h.riot = maxf(0.0, h.riot - 5.0 * delta)
-		else:
-			h.riot += (2.0 + h.demand * 0.08) * delta
-		if h.riot >= 100.0:
-			h.riot = 100.0
-			_end_game("Riot in " + h.hood_name)
+	# Water is a finite shared reserve; rain refills it slowly, leaks waste it.
+	reservoir = clampf(reservoir + (1.8 if is_raining else 0.8) * delta - (water_used / 100.0) * delta, 0.0, 100.0)
+	var diesel_capacity := 0.0
+	var all_power_capacity := 0.0
+	for facility in facilities:
+		if facility.kind == "power" and not facility.fault:
+			all_power_capacity += facility.capacity
+			if facility.fuel_type == "diesel":
+				diesel_capacity += facility.capacity
+	diesel_stock = maxf(0.0, diesel_stock - power_used * diesel_capacity / maxf(all_power_capacity, 1.0) * 0.22 * delta)
+	var power_shortage := maxf(0.0, power_used - power_supply)
+	var water_shortage := maxf(0.0, water_used - water_supply)
+	if power_shortage > 0.0:
+		for d in districts:
+			if d.has_power:
+				d.unrest += (power_shortage / maxf(power_supply, 1.0)) * 0.8 * delta
+	if water_shortage > 0.0 or reservoir < 8.0:
+		for d in districts:
+			if d.has_water:
+				d.unrest += (0.45 if reservoir < 8.0 else 0.22) * delta
+	for d in districts:
+		var power_off_count := 0
+		var water_off_count := 0
+		for house in d.houses:
+			if not house.has_power:
+				power_off_count += 1
+			if not house.has_water:
+				water_off_count += 1
+		d.unrest += (0.65 * power_off_count / d.houses.size() + 0.45 * water_off_count / d.houses.size()) * delta
+		if power_off_count == 0 and water_off_count == 0 and power_shortage <= 0.0 and water_shortage <= 0.0:
+			d.unrest = maxf(0.0, d.unrest - 1.8 * delta)
+		if d.issue == "Main pipe leak":
+			reservoir = maxf(0.0, reservoir - 0.35 * delta)
+		if d.unrest >= 100.0:
+			_end_game("Public patience ran out in " + d.title)
 			return
 
+	if income_clock >= 8.0:
+		income_clock = 0.0
+		_collect_tariffs()
+	if event_clock >= randf_range(35.0, 45.0):
+		event_clock = 0.0
+		_spawn_incident()
+	if treasury < -60.0:
+		_end_game("The treasury is empty. Even the repair truck is out of fuel.")
+		return
+	if time_alive >= 180.0:
+		_end_game("Shift complete. The city is mostly still here.")
+		return
 	queue_redraw()
+
+
+func _collect_tariffs() -> void:
+	var earned := 0.0
+	for d in districts:
+		for house in d.houses:
+			if house.unpaid:
+				house.arrears += 1
+			else:
+				earned += (int(house.has_power) + int(house.has_water)) * 0.2
+	treasury += earned
+	if earned > 0:
+		notice = "Bills collected: +$" + str(int(earned)) + " (some accounts remain mysteriously unpaid)."
+		notice_timer = 3.0
+
+
+func _spawn_incident() -> void:
+	var d: District = districts[randi_range(0, districts.size() - 1)]
+	var house: House = d.houses[randi_range(0, d.houses.size() - 1)]
+	if not house.unpaid and randi_range(0, 2) == 0:
+		house.unpaid = true
+		house.arrears = 1
+		notice = d.title + ": " + house.label + " has an overdue bill."
+	elif not house.illegal_hookup and randi_range(0, 1) == 0:
+		house.illegal_hookup = true
+		notice = "Illegal hookup detected at " + d.title + " / " + house.label + "."
+	else:
+		var candidates: Array[Facility] = []
+		for facility in facilities:
+			if not facility.fault and not facility.repairing:
+				candidates.append(facility)
+		if not candidates.is_empty() and randi_range(0, 1) == 0:
+			var facility: Facility = candidates[randi_range(0, candidates.size() - 1)]
+			facility.fault = true
+			facility.fault_name = "Equipment failure"
+			notice = "Incident: " + facility.title + " has failed. Tap its marker to dispatch a team."
+		else:
+			d.issue = ["Transformer fault", "Main pipe leak", "Copper theft"][randi_range(0, 2)]
+			if d.issue in ["Transformer fault", "Copper theft"]:
+				d.has_power = false
+				for h in d.houses:
+					h.has_power = false
+			elif d.issue == "Main pipe leak":
+				d.has_water = false
+				for h in d.houses:
+					h.has_water = false
+			notice = "Incident: " + d.issue.to_lower() + " in " + d.title + ". Tap the quartier to respond."
+	notice_timer = 6.0
 
 
 func _end_game(why: String) -> void:
 	game_over = true
 	reason = why
 	best_time = maxf(best_time, time_alive)
+	_save_best()
 	queue_redraw()
 
 
 func _input(event: InputEvent) -> void:
-	var e := event as InputEventMouseButton
-	if e == null or not e.pressed or e.button_index != MOUSE_BUTTON_LEFT:
+	var point := Vector2.ZERO
+	var pressed := false
+	if event is InputEventMouseButton:
+		var mouse := event as InputEventMouseButton
+		pressed = mouse.pressed and mouse.button_index == MOUSE_BUTTON_LEFT
+		point = mouse.position
+	elif event is InputEventScreenTouch:
+		var touch := event as InputEventScreenTouch
+		pressed = touch.pressed
+		point = touch.position
+	if not pressed:
+		if event is InputEventMouseButton:
+			var wheel := event as InputEventMouseButton
+			if wheel.pressed and wheel.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN] and game_started and not game_over and not diesel_panel_open and not rain_popup_open:
+				_zoom_map(1 if wheel.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
 		return
-
+	if game_started and not game_over and (diesel_panel_open or rain_popup_open):
+		for key in hitboxes:
+			if (hitboxes[key] as Rect2).has_point(point):
+				_handle_button(str(key))
+				return
+		return
+	if not game_started:
+		for key in hitboxes:
+			if (hitboxes[key] as Rect2).has_point(point):
+				if str(key) == "start":
+					_begin_shift()
+				elif str(key) in ["help", "help_close"]:
+					help_open = not help_open
+					queue_redraw()
+				return
+		return
 	if game_over:
-		_reset()
+		for key in hitboxes:
+			if str(key) == "restart" and (hitboxes[key] as Rect2).has_point(point):
+				_reset()
+				return
 		return
+	for key in hitboxes:
+		if (hitboxes[key] as Rect2).has_point(point):
+			_handle_button(str(key))
+			return
+	var map_rect := _map_rect(get_viewport_rect().size)
+	if map_rect.has_point(point):
+		var nearest_facility := -1
+		var facility_distance := INF
+		for i in facilities.size():
+			var dist := _facility_point(facilities[i], map_rect).distance_to(point)
+			if dist < facility_distance:
+				facility_distance = dist
+				nearest_facility = i
+		if nearest_facility >= 0 and facility_distance < 32.0:
+			selected_facility = nearest_facility
+			selected = -1
+			selected_house = -1
+			show_more_actions = false
+			queue_redraw()
+			return
+		if zoom_level == 2:
+			var district := _district_for_zoomed_map()
+			if district >= 0:
+				var d: District = districts[district]
+				var nearest_house := -1
+				var house_distance := INF
+				for h in d.houses.size():
+					var dist := _house_point(d, d.houses[h], map_rect).distance_to(point)
+					if dist < house_distance:
+						house_distance = dist
+						nearest_house = h
+				if nearest_house >= 0 and house_distance < 38.0:
+					selected = district
+					selected_house = nearest_house
+					selected_facility = -1
+					show_more_actions = false
+					queue_redraw()
+					return
+		var closest := -1
+		var distance := INF
+		for i in districts.size():
+			var marker := _district_point(districts[i], map_rect)
+			var dist := marker.distance_to(point)
+			if dist < distance:
+				distance = dist
+				closest = i
+		if closest >= 0 and distance < (90.0 if zoom_level == 0 else 75.0):
+			selected = closest
+			selected_house = -1
+			selected_facility = -1
+			if zoom_level < 2:
+				zoom_level += 1
+			show_more_actions = false
+			queue_redraw()
 
-	var size: Vector2 = get_viewport_rect().size
-	for h in hoods:
-		var center: Vector2 = h.pos * size
-		if center.distance_to(e.position) <= h.radius:
-			h.powered = not h.powered
-			break
+
+func _handle_button(action: String) -> void:
+	if action == "fuel_panel":
+		diesel_panel_open = true
+		queue_redraw()
+		return
+	if action == "fuel_close":
+		diesel_panel_open = false
+		queue_redraw()
+		return
+	if action == "fuel_month_down":
+		diesel_monthly_plan = maxi(1000, diesel_monthly_plan - 500)
+	elif action == "fuel_month_up":
+		diesel_monthly_plan = mini(12000, diesel_monthly_plan + 500)
+	elif action == "fuel_frequency":
+		var frequencies := [5, 10, 15, 30]
+		var current_index: int = frequencies.find(diesel_frequency_days)
+		diesel_frequency_days = frequencies[(current_index + 1) % frequencies.size()]
+		diesel_next_order_day = diesel_days_elapsed + float(diesel_frequency_days)
+	elif action == "fuel_auto":
+		diesel_auto_purchase = not diesel_auto_purchase
+	elif action == "fuel_order":
+		if _dispatch_diesel_order(_diesel_order_size(), false):
+			diesel_next_order_day = diesel_days_elapsed + float(diesel_frequency_days)
+	elif action == "rain_cut_all":
+		for d in districts:
+			d.has_power = false
+			for house in d.houses:
+				house.has_power = false
+		rain_popup_open = false
+		rain_popup_seen = true
+		notice = "Rain protocol activated: power cut in every quartier. The reason is still unclear."
+		notice_timer = 6.0
+		queue_redraw()
+		return
+	elif action == "rain_ignore":
+		rain_popup_open = false
+		rain_popup_seen = true
+		notice = "Rain observed. No one can explain the outage policy."
+		notice_timer = 5.0
+		queue_redraw()
+		return
+	if action in ["fuel_month_down", "fuel_month_up", "fuel_frequency", "fuel_auto", "fuel_order"]:
+		queue_redraw()
+		return
+	if action == "zoom_in":
+		_zoom_map(1)
+		return
+	if action == "zoom_out":
+		_zoom_map(-1)
+		return
+	if action == "zoom_home":
+		zoom_level = 0
+		selected = -1
+		selected_house = -1
+		selected_facility = -1
+		map_pan = Vector2.ZERO
+		queue_redraw()
+		return
+	if action == "more":
+		show_more_actions = not show_more_actions
+		queue_redraw()
+		return
+	if action == "close_selection":
+		selected = -1
+		selected_house = -1
+		selected_facility = -1
+		show_more_actions = false
+		queue_redraw()
+		return
+	if selected_facility >= 0:
+		_handle_facility_action(action)
+		return
+	if selected_house >= 0 and selected >= 0:
+		_handle_house_action(action)
+		return
+	if selected < 0:
+		if action == "upgrade_crew":
+			_upgrade_crew()
+		return
+	var d: District = districts[selected]
+	match action:
+		"power":
+			d.has_power = not d.has_power
+			for house in d.houses:
+				house.has_power = d.has_power
+			notice = d.title + (" connected to the grid." if d.has_power else " put on the outage schedule.")
+		"water":
+			d.has_water = not d.has_water
+			for house in d.houses:
+				house.has_water = d.has_water
+			notice = d.title + (" water valve opened." if d.has_water else " water rationed.")
+		"repair":
+			if d.repairing:
+				notice = "Repair team is working: " + _clock_string(d.repair_left) + " remaining."
+			elif crew_cooldown > 0.0:
+				notice = "Maintenance team returns in " + _clock_string(crew_cooldown) + "."
+			elif d.issue == "":
+				notice = "No reported fault here. The paperwork is already caught up."
+			else:
+				var cost := 55 if d.issue == "Main pipe leak" else 38
+				if treasury < cost:
+					notice = "Repair costs $" + str(cost) + ". Treasury says: maybe tomorrow."
+				else:
+					treasury -= cost
+					d.repairing = true
+					d.repair_left = _repair_duration()
+					crew_cooldown = d.repair_left + 12.0
+					notice = "Team dispatched to " + d.title + ". Repair takes " + _clock_string(d.repair_left) + "."
+		"inspect":
+			var found := false
+			for house in d.houses:
+				if house.illegal_hookup:
+					found = true
+			if found:
+				if treasury < 20:
+					notice = "Inspection team needs $20 for fuel."
+				else:
+					treasury -= 20
+					for house in d.houses:
+						house.illegal_hookup = false
+					notice = "Illegal connection removed in " + d.title + "."
+			else:
+				notice = "No illegal connection detected. Inspector requests per diem anyway."
+		"billing":
+			var count := 0
+			for house in d.houses:
+				if house.unpaid:
+					count += 1
+			if count > 0 and treasury >= 12:
+				treasury -= 12
+				for house in d.houses:
+					if house.unpaid:
+						treasury += house.arrears * 14
+						house.arrears = 0
+						house.unpaid = false
+				notice = "Billing visit complete in " + d.title + "."
+			else:
+				notice = "No overdue bills found, or billing has no $12 fuel money."
+		"upgrade_crew":
+			_upgrade_crew()
+		"loan":
+			if not loan_used and treasury < 120.0:
+				treasury += 180
+				loan_used = true
+				notice = "Emergency loan approved: +$180."
+	notice_timer = 5.0
+	queue_redraw()
+
+
+func _map_rect(size: Vector2) -> Rect2:
+	if _is_portrait(size):
+		var portrait_top := 88.0
+		var portrait_bottom := size.y - 380.0
+		return Rect2(0.0, portrait_top, size.x, maxf(140.0, portrait_bottom - portrait_top))
+	var margin := 22.0
+	var desktop_top := 126.0
+	var bottom := size.y - 94.0
+	var width := size.x * 0.66
+	return Rect2(margin, desktop_top, width - margin, maxf(200.0, bottom - desktop_top))
+
+
+func _panel_rect(size: Vector2) -> Rect2:
+	if _is_portrait(size):
+		var has_selection := selected >= 0 or selected_house >= 0 or selected_facility >= 0
+		var panel_height := 136.0 if not has_selection else (380.0 if show_more_actions else 280.0)
+		return Rect2(12.0, size.y - panel_height - 14.0, size.x - 24.0, panel_height)
+	return Rect2(size.x * 0.69, 126.0, size.x * 0.29 - 22.0, size.y - 220.0)
+
+
+func _is_portrait(size: Vector2) -> bool:
+	return size.x < size.y
+
+
+func _district_point(d: District, rect: Rect2) -> Vector2:
+	var world := _geo_to_world(d.latitude, d.longitude)
+	var camera := Vector2(55.0, 0.0) if zoom_level == 0 else (Vector2.ZERO if zoom_level == 1 else _district_world(_district_for_zoomed_map()))
+	var scale := 2.2 if zoom_level == 0 else (24.0 if zoom_level == 1 else 720.0)
+	return rect.get_center() + Vector2((world.x - camera.x) * scale, -(world.y - camera.y) * scale) + map_pan
+
+
+func _geo_to_world(latitude: float, longitude: float) -> Vector2:
+	return Vector2((longitude - MAP_CENTER_LON) * 105.3, (MAP_CENTER_LAT - latitude) * 111.32)
+
+
+func _district_world(index: int) -> Vector2:
+	if index < 0 or index >= districts.size():
+		return Vector2.ZERO
+	var d: District = districts[index]
+	return _geo_to_world(d.latitude, d.longitude)
+
+
+func _facility_point(facility: Facility, rect: Rect2) -> Vector2:
+	var world := _geo_to_world(facility.latitude, facility.longitude)
+	var camera := Vector2(55.0, 0.0) if zoom_level == 0 else (Vector2.ZERO if zoom_level == 1 else _district_world(_district_for_zoomed_map()))
+	var scale := 2.2 if zoom_level == 0 else (24.0 if zoom_level == 1 else 720.0)
+	return rect.get_center() + Vector2((world.x - camera.x) * scale, -(world.y - camera.y) * scale) + map_pan + facility.display_offset
+
+
+func _house_point(d: District, house: House, rect: Rect2) -> Vector2:
+	var center := _district_world(_district_for_zoomed_map())
+	var offset_km := Vector2(house.offset.x * 105.3, -house.offset.y * 111.32)
+	return rect.get_center() + Vector2((center.x - _district_world(_district_for_zoomed_map()).x) * 720.0, -(center.y - _district_world(_district_for_zoomed_map()).y) * 720.0) + offset_km * 720.0 + map_pan
+
+
+func _district_for_zoomed_map() -> int:
+	return selected if selected >= 0 else 0
+
+
+func _district_unpaid_count(d: District) -> int:
+	var count := 0
+	for house in d.houses:
+		if house.unpaid:
+			count += 1
+	return count
+
+
+func _district_illegal_count(d: District) -> int:
+	var count := 0
+	for house in d.houses:
+		if house.illegal_hookup:
+			count += 1
+	return count
+
+
+func _zoom_map(amount: int) -> void:
+	zoom_level = clampi(zoom_level + amount, 0, 2)
+	if zoom_level == 0:
+		selected = -1
+		selected_house = -1
+		selected_facility = -1
+	map_pan = Vector2.ZERO
+	queue_redraw()
+
+
+func _repair_duration() -> float:
+	return maxf(6.0, 32.0 - (crew_level - 1) * 7.0)
+
+
+func _upgrade_crew() -> void:
+	if crew_level >= 3:
+		notice = "Maintenance team is fully upgraded."
+	elif treasury < 240.0:
+		notice = "Crew upgrade needs $240. Keep collecting bills first."
+	else:
+		treasury -= 240.0
+		crew_level += 1
+		notice = "Maintenance crew upgraded to level " + str(crew_level) + ". Repairs are faster now."
+	notice_timer = 5.0
+	queue_redraw()
+
+
+func _handle_facility_action(action: String) -> void:
+	var facility: Facility = facilities[selected_facility]
+	if action == "repair_facility":
+		if facility.repairing:
+			notice = "Team is at the site: " + _clock_string(facility.repair_left) + " left."
+		elif crew_cooldown > 0.0:
+			notice = "Maintenance team returns in " + _clock_string(crew_cooldown) + "."
+		elif not facility.fault:
+			notice = facility.title + " is operating normally."
+		elif treasury < 65.0:
+			notice = "Dispatch needs $65 for parts and fuel."
+		else:
+			treasury -= 65.0
+			facility.repairing = true
+			facility.repair_left = _repair_duration() + 10.0
+			crew_cooldown = facility.repair_left + 12.0
+			notice = "Team dispatched to " + facility.title + ". It will take " + _clock_string(facility.repair_left) + "."
+	elif action == "upgrade_crew":
+		_upgrade_crew()
+	notice_timer = 5.0
+	queue_redraw()
+
+
+func _handle_house_action(action: String) -> void:
+	var d: District = districts[selected]
+	var house: House = d.houses[selected_house]
+	match action:
+		"house_power":
+			house.has_power = not house.has_power
+			notice = house.label + (" reconnected to power." if house.has_power else " disconnected from power.")
+		"house_water":
+			house.has_water = not house.has_water
+			notice = house.label + (" water restored." if house.has_water else " water valve closed.")
+		"house_bill":
+			if not house.unpaid:
+				notice = "This account is paid up."
+			elif treasury < 12.0:
+				notice = "Billing visit needs $12 fuel."
+			else:
+				treasury -= 12.0
+				treasury += house.arrears * 14.0
+				house.arrears = 0
+				house.unpaid = false
+				notice = house.label + " settled its bill."
+		"house_inspect":
+			if not house.illegal_hookup:
+				notice = "No illegal connection found at this house."
+			elif treasury < 20.0:
+				notice = "Inspection needs $20 fuel."
+			else:
+				treasury -= 20.0
+				house.illegal_hookup = false
+				notice = "Illegal hookup removed from " + house.label + "."
+		"upgrade_crew":
+			_upgrade_crew()
+	notice_timer = 5.0
+	queue_redraw()
+
+
+func _button(name: String, rect: Rect2, label: String, active := false, danger := false) -> void:
+	hitboxes[name] = rect
+	var fill := PANEL_HI if active else TEAL
+	if danger:
+		fill = RED
+	_draw_round_rect(rect, fill, 18)
+	var color := INK if active else Color.WHITE
+	draw_string(font, rect.position + Vector2(9, rect.size.y * 0.67), label, HORIZONTAL_ALIGNMENT_CENTER, rect.size.x - 18.0, 14, color)
+
+
+func _draw_round_rect(rect: Rect2, fill: Color, radius: float = 22.0) -> void:
+	var style := StyleBoxFlat.new()
+	style.bg_color = fill
+	style.corner_radius_top_left = int(radius)
+	style.corner_radius_top_right = int(radius)
+	style.corner_radius_bottom_left = int(radius)
+	style.corner_radius_bottom_right = int(radius)
+	style.anti_aliasing = true
+	draw_style_box(style, rect)
+
+
+func _draw_title_screen(size: Vector2) -> void:
+	# Quiet, illustrated title screen: one obvious action and an optional help card.
+	var sky_top := Color("#f7f4e9")
+	var sky_bottom := Color("#dcebe0")
+	for band in 28:
+		var t := float(band) / 27.0
+		var band_color := sky_top.lerp(sky_bottom, t)
+		draw_rect(Rect2(0, size.y * band / 28.0, size.x, size.y / 28.0 + 1.0), band_color)
+	var title_y := size.y * 0.17
+	draw_string(font, Vector2(0, title_y - 20), "A CITY-SERVICES GAME", HORIZONTAL_ALIGNMENT_CENTER, size.x, 12, TEAL)
+	draw_string(font, Vector2(0, title_y + 40), "JIRAMATY", HORIZONTAL_ALIGNMENT_CENTER, size.x, 48, INK)
+	draw_string(font, Vector2(size.x * 0.12, title_y + 82), "Keep the city going, one neighborhood at a time.", HORIZONTAL_ALIGNMENT_CENTER, size.x * 0.76, 15, MUTED)
+	_draw_city_illustration(size)
+	var start_h := clampf(size.y * 0.052, 52.0, 66.0)
+	var button_rect := Rect2(size.x * 0.10, size.y * 0.755, size.x * 0.80, start_h)
+	_draw_round_rect(Rect2(button_rect.position + Vector2(0, 5), button_rect.size), Color("#1c6759", 0.20), 28)
+	_draw_round_rect(button_rect, TEAL, 28)
+	draw_string(font, Vector2(button_rect.position.x, button_rect.position.y + 42), "START A SHIFT", HORIZONTAL_ALIGNMENT_CENTER, button_rect.size.x, 19, Color.WHITE)
+	hitboxes["start"] = button_rect
+	var help_h := clampf(size.y * 0.042, 48.0, 54.0)
+	var help_rect := Rect2(size.x * 0.25, size.y * 0.845, size.x * 0.50, help_h)
+	_draw_round_rect(help_rect, Color("#fffdf7", 0.82), 24)
+	draw_string(font, Vector2(help_rect.position.x, help_rect.position.y + 33), "HOW TO PLAY", HORIZONTAL_ALIGNMENT_CENTER, help_rect.size.x, 14, INK)
+	hitboxes["help"] = help_rect
+	if best_time > 0.0:
+		draw_string(font, Vector2(0, size.y * 0.94), "BEST SHIFT  " + _clock_string(best_time), HORIZONTAL_ALIGNMENT_CENTER, size.x, 11, MUTED)
+
+
+func _draw_city_illustration(size: Vector2) -> void:
+	var width := size.x
+	var base_y := size.y * 0.665
+	# Soft landscape layers keep the illustration warm and legible behind the city.
+	draw_colored_polygon(PackedVector2Array([Vector2(0, base_y - 18), Vector2(width * 0.22, base_y - 94), Vector2(width * 0.43, base_y - 25), Vector2(width * 0.65, base_y - 105), Vector2(width, base_y - 20), Vector2(width, size.y * 0.76), Vector2(0, size.y * 0.76)]), Color("#bfd9c7"))
+	draw_colored_polygon(PackedVector2Array([Vector2(0, base_y + 18), Vector2(width * 0.30, base_y - 20), Vector2(width * 0.58, base_y + 5), Vector2(width * 0.82, base_y - 35), Vector2(width, base_y + 12), Vector2(width, size.y * 0.76), Vector2(0, size.y * 0.76)]), Color("#a9cbb4"))
+	var buildings := [
+		[0.05, 0.16, 0.10, "#789e88"], [0.17, 0.10, 0.11, "#5d8979"],
+		[0.30, 0.19, 0.12, "#86a994"], [0.44, 0.13, 0.10, "#4f8172"],
+		[0.56, 0.21, 0.12, "#779c87"], [0.70, 0.14, 0.11, "#578576"],
+		[0.83, 0.18, 0.12, "#83a891"],
+	]
+	for item in buildings:
+		var bx := width * float(item[0])
+		var bh := size.y * float(item[1])
+		var bw := width * float(item[2])
+		var by := base_y - bh
+		_draw_round_rect(Rect2(bx, by, bw, bh), Color(item[3]), 10)
+		for row in 3:
+			for col in 2:
+				var wx := bx + bw * (0.25 + col * 0.42)
+				var wy := by + bh * (0.20 + row * 0.23)
+				draw_circle(Vector2(wx, wy), 3.2, Color("#f8d99c", 0.82))
+	# A water tower and two softly lit utility poles make the theme read at a glance.
+	var tower_x := width * 0.23
+	var tower_y := base_y - size.y * 0.25
+	draw_line(Vector2(tower_x, tower_y + 26), Vector2(tower_x, base_y - 4), Color("#39766b"), 6)
+	_draw_round_rect(Rect2(tower_x - 22, tower_y, 44, 30), Color("#f0a36c"), 14)
+	draw_line(Vector2(width * 0.12, base_y - 5), Vector2(width * 0.12, base_y - size.y * 0.20), Color("#4d786e"), 4)
+	draw_line(Vector2(width * 0.12, base_y - size.y * 0.18), Vector2(width * 0.81, base_y - size.y * 0.18), Color("#4d786e", 0.75), 2)
+	draw_line(Vector2(width * 0.81, base_y - size.y * 0.18), Vector2(width * 0.81, base_y - 5), Color("#4d786e"), 4)
+	draw_circle(Vector2(width * 0.12, base_y - size.y * 0.18), 5, AMBER)
+	draw_circle(Vector2(width * 0.81, base_y - size.y * 0.18), 5, AMBER)
+	draw_rect(Rect2(0, base_y, width, size.y * 0.76 - base_y), Color("#e6c08c"))
+
+
+func _draw_help(size: Vector2) -> void:
+	draw_rect(Rect2(Vector2.ZERO, size), Color("#17302b", 0.56))
+	var card := Rect2(size.x * 0.08, size.y * 0.29, size.x * 0.84, size.y * 0.40)
+	_draw_round_rect(card, PANEL, 28)
+	draw_string(font, Vector2(card.position.x + 22, card.position.y + 42), "A SIMPLE FIRST SHIFT", HORIZONTAL_ALIGNMENT_LEFT, card.size.x - 44, 20, INK)
+	var copy_y := card.position.y + 86
+	var instructions := [
+		"1. Tap a neighborhood on the map.",
+		"2. Use Power and Water to balance demand.",
+		"3. Fix faults when they appear. Keep patience up.",
+	]
+	for line in instructions:
+		draw_string(font, Vector2(card.position.x + 22, copy_y), line, HORIZONTAL_ALIGNMENT_LEFT, card.size.x - 44, 14, MUTED)
+		copy_y += 34
+	var close_rect := Rect2(card.position.x + 18, card.end.y - 70, card.size.x - 36, 52)
+	_button("help_close", close_rect, "GOT IT", false)
 
 
 func _draw() -> void:
-	var size: Vector2 = get_viewport_rect().size
-	draw_rect(Rect2(Vector2.ZERO, size), Color(0.07, 0.08, 0.12))
-
-	# Neighborhoods.
-	for h in hoods:
-		var center: Vector2 = h.pos * size
-		var fill: Color = Color(0.95, 0.80, 0.25) if h.powered else Color(0.18, 0.19, 0.24)
-		draw_circle(center, h.radius, fill)
-		draw_arc(center, h.radius, 0.0, TAU, 48, Color(1, 1, 1, 0.5), 3.0)
-
-		var label_w: float = h.radius * 2.0 + 60.0
-		var text_col: Color = Color(0.1, 0.1, 0.1) if h.powered else Color(0.85, 0.85, 0.9)
-		draw_string(font, Vector2(center.x - label_w / 2.0, center.y - 4.0), h.hood_name, HORIZONTAL_ALIGNMENT_CENTER, label_w, 18, text_col)
-		draw_string(font, Vector2(center.x - label_w / 2.0, center.y + 20.0), "demand " + str(int(h.demand)), HORIZONTAL_ALIGNMENT_CENTER, label_w, 16, text_col)
-
-		# Riot bar under each neighborhood.
-		var bar_w: float = h.radius * 2.0
-		var bar_pos: Vector2 = Vector2(center.x - h.radius, center.y + h.radius + 10.0)
-		draw_rect(Rect2(bar_pos, Vector2(bar_w, 12.0)), Color(0.2, 0.2, 0.25))
-		var riot_col: Color = Color(0.9, 0.25, 0.2) if h.riot > 66.0 else Color(0.95, 0.6, 0.2)
-		draw_rect(Rect2(bar_pos, Vector2(bar_w * h.riot / 100.0, 12.0)), riot_col)
-
-	# HUD.
-	draw_string(font, Vector2(20.0, 36.0), "Time: " + str(snappedf(time_alive, 0.1)) + "s   Best: " + str(snappedf(best_time, 0.1)) + "s", HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color.WHITE)
-	draw_string(font, Vector2(20.0, 66.0), "Supply: " + str(int(supply)) + "   Used: " + str(int(powered_demand)), HORIZONTAL_ALIGNMENT_LEFT, -1, 22, Color.WHITE)
-
-	var ov_pos: Vector2 = Vector2(20.0, 80.0)
-	draw_rect(Rect2(ov_pos, Vector2(size.x - 40.0, 14.0)), Color(0.2, 0.2, 0.25))
-	draw_rect(Rect2(ov_pos, Vector2((size.x - 40.0) * overload / 100.0, 14.0)), Color(0.9, 0.3, 0.2))
-	draw_string(font, Vector2(20.0, 118.0), "Grid overload", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0.8, 0.8, 0.85))
-
-	# Game over overlay.
+	var size := get_viewport_rect().size
+	hitboxes.clear()
+	draw_rect(Rect2(Vector2.ZERO, size), BG)
+	if not game_started:
+		_draw_title_screen(size)
+		if help_open:
+			_draw_help(size)
+		return
+	_draw_header(size)
+	_draw_map(size)
+	_draw_panel(size)
+	_draw_footer(size)
+	if diesel_panel_open:
+		_draw_diesel_panel(size)
+	if rain_popup_open and not diesel_panel_open:
+		_draw_rain_popup(size)
 	if game_over:
-		draw_rect(Rect2(Vector2.ZERO, size), Color(0, 0, 0, 0.75))
-		draw_string(font, Vector2(0.0, size.y * 0.42), "GAME OVER", HORIZONTAL_ALIGNMENT_CENTER, size.x, 48, Color.WHITE)
-		draw_string(font, Vector2(0.0, size.y * 0.48), reason, HORIZONTAL_ALIGNMENT_CENTER, size.x, 26, Color(0.95, 0.5, 0.4))
-		draw_string(font, Vector2(0.0, size.y * 0.53), "Survived " + str(snappedf(time_alive, 0.1)) + "s", HORIZONTAL_ALIGNMENT_CENTER, size.x, 26, Color.WHITE)
-		draw_string(font, Vector2(0.0, size.y * 0.60), "Tap to restart", HORIZONTAL_ALIGNMENT_CENTER, size.x, 22, Color(0.8, 0.8, 0.85))
+		_draw_game_over(size)
+
+
+func _draw_header(size: Vector2) -> void:
+	if _is_portrait(size):
+		_draw_round_rect(Rect2(12, 10, size.x - 24, 62), PANEL, 24)
+		draw_string(font, Vector2(27, 37), "JIRAMATY", HORIZONTAL_ALIGNMENT_LEFT, 132, 19, INK)
+		draw_string(font, Vector2(29, 54), "SHIFT " + _clock_string(time_alive), HORIZONTAL_ALIGNMENT_LEFT, 100, 10, MUTED)
+		var cash_color := RED if treasury < 100 else TEAL
+		draw_string(font, Vector2(size.x - 146, 38), "$" + str(int(treasury)), HORIZONTAL_ALIGNMENT_RIGHT, 126, 18, cash_color)
+		draw_string(font, Vector2(size.x - 146, 55), _clock_string(maxf(0.0, 180.0 - time_alive)) + " LEFT", HORIZONTAL_ALIGNMENT_RIGHT, 126, 10, MUTED)
+		return
+	draw_rect(Rect2(0, 0, size.x, 104), PANEL)
+	draw_rect(Rect2(0, 102, size.x, 2), TEAL)
+	draw_string(font, Vector2(24, 38), "JIRAMATY", HORIZONTAL_ALIGNMENT_LEFT, 240, 27, INK)
+	draw_string(font, Vector2(26, 65), "UTILITY CRISIS MANAGER", HORIZONTAL_ALIGNMENT_LEFT, 240, 12, TEAL)
+	draw_string(font, Vector2(size.x * 0.37, 38), "SHIFT " + _clock_string(time_alive), HORIZONTAL_ALIGNMENT_LEFT, 170, 20, INK)
+	draw_string(font, Vector2(size.x * 0.37, 65), "BEST " + _clock_string(best_time), HORIZONTAL_ALIGNMENT_LEFT, 170, 12, MUTED)
+	var cash_color := RED if treasury < 100 else AMBER
+	draw_string(font, Vector2(size.x - 205, 39), "$" + str(int(treasury)), HORIZONTAL_ALIGNMENT_RIGHT, 175, 25, cash_color)
+	draw_string(font, Vector2(size.x - 205, 65), "TREASURY", HORIZONTAL_ALIGNMENT_RIGHT, 175, 12, MUTED)
+	# Resource strips summarize shared capacity and demand.
+	var bar_x := size.x * 0.55
+	var bar_w := size.x * 0.21
+	draw_string(font, Vector2(bar_x, 31), "POWER", HORIZONTAL_ALIGNMENT_LEFT, 80, 11, MUTED)
+	draw_string(font, Vector2(bar_x, 50), str(int(power_used)) + " / " + str(int(power_supply)), HORIZONTAL_ALIGNMENT_LEFT, 130, 15, INK)
+	_draw_meter(Rect2(bar_x + 100, 39, bar_w - 100, 9), power_used / maxf(power_supply, 1.0), RED, TEAL)
+	draw_string(font, Vector2(bar_x, 76), "WATER", HORIZONTAL_ALIGNMENT_LEFT, 80, 11, MUTED)
+	draw_string(font, Vector2(bar_x, 93), str(int(water_used)) + " / " + str(int(water_supply)), HORIZONTAL_ALIGNMENT_LEFT, 130, 15, INK)
+	_draw_meter(Rect2(bar_x + 100, 82, bar_w - 100, 9), water_used / maxf(water_supply, 1.0), RED, TEAL)
+
+
+func _draw_map(size: Vector2) -> void:
+	var r := _map_rect(size)
+	draw_rect(r, Color("#d5e4d4") if zoom_level == 0 else Color("#dfead9"))
+	if zoom_level == 0:
+		_draw_regional_map(r)
+	elif zoom_level == 1:
+		_draw_city_map(r)
+	else:
+		_draw_quartier_map(r)
+	var level_names: Array[String] = ["REGIONAL GRID", "ANTANANARIVO", "QUARTIER / HOUSES"]
+	var level_name: String = level_names[zoom_level]
+	draw_string(font, r.position + Vector2(70 if zoom_level > 0 else 14, 24), level_name, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 130, 11, MUTED)
+	_button("zoom_out", Rect2(r.end.x - 110, r.position.y + 8, 48, 48), "−", false)
+	_button("fuel_panel", Rect2(r.end.x - 166, r.position.y + 8, 48, 48), "FUEL", diesel_panel_open)
+	_button("zoom_in", Rect2(r.end.x - 58, r.position.y + 8, 48, 48), "+", false)
+	if zoom_level > 0:
+		_button("zoom_home", Rect2(r.position.x + 10, r.position.y + 8, 48, 48), "MAP", false)
+
+
+func _draw_regional_map(r: Rect2) -> void:
+	var tana := _district_point(districts[0], r)
+	var ambohi := _facility_point(facilities[1], r)
+	var andekaleka := _facility_point(facilities[0], r)
+	var antelomita := _facility_point(facilities[2], r)
+	var mandroseza := _facility_point(facilities[3], r)
+	draw_line(andekaleka, ambohi, Color("#e9a056", 0.75), 3.0)
+	draw_line(ambohi, tana, Color("#e9a056", 0.75), 3.0)
+	draw_line(antelomita, ambohi, Color("#e9a056", 0.60), 2.0)
+	draw_line(mandroseza, tana, Color("#4682bd", 0.62), 2.5)
+	draw_line(_facility_point(facilities[4], r), tana, Color("#4682bd", 0.40), 1.8)
+	draw_line(_facility_point(facilities[5], r), tana, Color("#4682bd", 0.40), 1.8)
+	draw_line(_facility_point(facilities[6], r), tana, Color("#e9a056", 0.50), 2.0)
+	draw_line(_facility_point(facilities[7], r), tana, Color("#6d88b6", 0.60), 2.0)
+	draw_line(_facility_point(facilities[8], r), tana, Color("#d7a648", 0.62), 2.0)
+	for d in districts:
+		draw_circle(_district_point(d, r), 12.0, Color("#24836d", 0.24))
+	draw_circle(tana, 38.0, Color("#24836d", 0.06))
+	draw_arc(tana, 38.0, 0, TAU, 64, Color("#24836d", 0.42), 2.0)
+	draw_circle(tana, 25.0, Color("#ffffff", 0.74))
+	draw_circle(tana, 18.0, TEAL)
+	draw_string(font, tana + Vector2(-75, 42), "ANTANANARIVO · tap to zoom", HORIZONTAL_ALIGNMENT_CENTER, 150, 11, INK)
+	for facility in facilities:
+		_draw_facility_marker(facility, r, 0)
+
+
+func _draw_city_map(r: Rect2) -> void:
+	for i in range(1, 7):
+		var x := r.position.x + r.size.x * i / 7.0
+		var y := r.position.y + r.size.y * i / 7.0
+		draw_line(Vector2(x, r.position.y), Vector2(x + 16, r.end.y), Color("#fffdf7", 0.85), 7.0)
+		draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y + 9), Color("#fffdf7", 0.85), 7.0)
+	for i in districts.size():
+		var d: District = districts[i]
+		var center := _district_point(d, r)
+		var radius := 26.0 if i == selected else 20.0
+		var fill := Color("#c9dfce") if d.has_power and d.has_water else Color("#f0d8b6")
+		if d.issue != "" or d.unrest > 65.0:
+			fill = Color("#f1c0b7")
+		draw_circle(center, radius + 8.0, Color("#fffdf7", 0.85))
+		draw_circle(center, radius, fill)
+		draw_arc(center, radius, 0, TAU, 36, TEAL, 2.0)
+		draw_string(font, center + Vector2(-56, 39), d.title, HORIZONTAL_ALIGNMENT_CENTER, 112, 11, INK)
+		var alert_count := 0
+		for house in d.houses:
+			if house.unpaid or house.illegal_hookup:
+				alert_count += 1
+		if d.issue != "" or alert_count > 0:
+			draw_circle(center + Vector2(16, -15), 7.0, RED if d.issue != "" else AMBER)
+	for facility in facilities:
+		if absf(facility.latitude - MAP_CENTER_LAT) < 0.20 and absf(facility.longitude - MAP_CENTER_LON) < 0.22:
+			_draw_facility_marker(facility, r, 1)
+
+
+func _draw_quartier_map(r: Rect2) -> void:
+	var d_index := _district_for_zoomed_map()
+	if d_index < 0:
+		return
+	var d: District = districts[d_index]
+	var center := r.get_center() + map_pan
+	var boundary_radius := minf(r.size.x, r.size.y) * 0.40
+	draw_circle(center, boundary_radius, Color("#b8d5c1", 0.27))
+	draw_arc(center, boundary_radius, 0, TAU, 64, Color("#78a98f"), 2.0)
+	for i in range(-3, 4):
+		var x := center.x + i * 53.0
+		var y := center.y + i * 46.0
+		draw_line(Vector2(x, r.position.y + 48), Vector2(x + 25, r.end.y - 4), Color("#fffdf7", 0.95), 5.0)
+		draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y + 14), Color("#fffdf7", 0.95), 5.0)
+	var transformer := center + Vector2(-20, 14)
+	for house in d.houses:
+		var p := _house_point(d, house, r)
+		draw_line(transformer, p, Color("#24836d", 0.38), 1.2)
+		draw_circle(p, 12.0, Color("#fffdf7"))
+		var house_color := TEAL if house.has_power else Color("#9b9c91")
+		if house.unpaid:
+			house_color = RED
+		elif house.illegal_hookup:
+			house_color = AMBER
+		draw_rect(Rect2(p - Vector2(7, 7), Vector2(14, 14)), house_color)
+		draw_string(font, p + Vector2(9, 3), house.label.replace("House ", "H"), HORIZONTAL_ALIGNMENT_LEFT, 30, 8, INK)
+		draw_circle(p + Vector2(8, -8), 3.0, Color("#4682bd") if house.has_water else Color("#aeb7b0"))
+		if selected_house >= 0 and d.houses[selected_house] == house:
+			draw_arc(p, 15.0, 0, TAU, 24, INK, 2.0)
+	var transformer_color := Color("#e9a056") if d.has_power else RED
+	draw_rect(Rect2(transformer - Vector2(9, 9), Vector2(18, 18)), transformer_color)
+	draw_string(font, r.position + Vector2(14, 48), d.title + " · " + str(d.houses.size()) + " accounts", HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 28, 12, INK)
+	draw_string(font, r.position + Vector2(14, 66), "Tap a house. Red = overdue bill · amber = illegal hookup", HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 28, 10, MUTED)
+
+
+func _draw_facility_marker(facility: Facility, r: Rect2, level: int) -> void:
+	var p := _facility_point(facility, r)
+	if not r.grow(18).has_point(p):
+		return
+	var color := Color("#24836d")
+	match facility.fuel_type:
+		"hydro":
+			color = Color("#258f7a")
+		"hfo":
+			color = Color("#d28244")
+		"diesel":
+			color = Color("#7763ad")
+		"solar":
+			color = Color("#d3a832")
+		"water":
+			color = Color("#4682bd")
+	if facility.fault:
+		color = RED
+	draw_circle(p, 10.0 if level == 0 else 8.0, Color("#fffdf7"))
+	draw_circle(p, 7.0 if level == 0 else 5.0, color)
+	if selected_facility >= 0 and facilities[selected_facility] == facility:
+		draw_arc(p, 13.0, 0, TAU, 32, INK, 2.0)
+	draw_string(font, p + Vector2(9, -7), facility.title, HORIZONTAL_ALIGNMENT_LEFT, 155, 9, INK)
+
+
+func _draw_panel(size: Vector2) -> void:
+	var r := _panel_rect(size)
+	_draw_round_rect(Rect2(r.position + Vector2(0, 6), r.size), Color("#344b40", 0.12), 28)
+	_draw_round_rect(r, PANEL, 28)
+	if selected_facility >= 0:
+		_draw_facility_panel(r, facilities[selected_facility])
+		return
+	if selected_house >= 0 and selected >= 0:
+		_draw_house_panel(r, districts[selected], districts[selected].houses[selected_house])
+		return
+	if selected < 0:
+		var prompt := "Tap a neighborhood to get started."
+		draw_string(font, Vector2(r.position.x + 18, r.position.y + 38), "Your shift is ready", HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 36, 19, INK)
+		draw_string(font, Vector2(r.position.x + 18, r.position.y + 68), prompt, HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 36, 13, MUTED)
+		draw_string(font, Vector2(r.position.x + 18, r.position.y + 98), "First incident in  " + _clock_string(maxf(0.0, 35.0 - time_alive)), HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 36, 11, TEAL)
+		_button("upgrade_crew", Rect2(r.end.x - 132, r.position.y + 18, 112, 44), "CREW  Lv" + str(crew_level) + "  ↑", false)
+		return
+	var d: District = districts[selected]
+	if _is_portrait(size):
+		_draw_portrait_panel(r, d)
+	else:
+		_draw_desktop_panel(r, d)
+
+
+func _draw_desktop_panel(r: Rect2, d: District) -> void:
+	var x := r.position.x + 16.0
+	var width := r.size.x - 32.0
+	draw_string(font, Vector2(x, r.position.y + 24), "DISPATCH DESK", HORIZONTAL_ALIGNMENT_LEFT, width, 11, TEAL)
+	draw_string(font, Vector2(x, r.position.y + 52), d.title, HORIZONTAL_ALIGNMENT_LEFT, width, 21, INK)
+	draw_string(font, Vector2(x, r.position.y + 75), "POWER " + str(int(d.demand_power)) + "   WATER " + str(int(d.demand_water)), HORIZONTAL_ALIGNMENT_LEFT, width, 12, MUTED)
+	var yy := r.position.y + 101.0
+	draw_string(font, Vector2(x, yy), "CONNECTIONS", HORIZONTAL_ALIGNMENT_LEFT, width, 10, MUTED)
+	yy += 11
+	var bw := (width - 8.0) / 2.0
+	_button("power", Rect2(x, yy, bw, 34), "⚡  " + ("ON" if d.has_power else "OFF"), d.has_power, not d.has_power)
+	_button("water", Rect2(x + bw + 8.0, yy, bw, 34), "●  " + ("WATER ON" if d.has_water else "WATER OFF"), d.has_water, not d.has_water)
+	yy += 51.0
+	draw_string(font, Vector2(x, yy), "FIELD CONDITIONS", HORIZONTAL_ALIGNMENT_LEFT, width, 10, MUTED)
+	yy += 20
+	var issue_text := d.issue if d.issue != "" else "No active infrastructure fault"
+	var illegal_count := _district_illegal_count(d)
+	var unpaid_count := _district_unpaid_count(d)
+	if illegal_count > 0:
+		issue_text += "  ·  illegal hookups " + str(illegal_count)
+	if unpaid_count > 0:
+		issue_text += "  ·  overdue accounts " + str(unpaid_count)
+	draw_string(font, Vector2(x, yy), issue_text, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if d.issue != "" else (AMBER if illegal_count > 0 or unpaid_count > 0 else INK))
+	yy += 27.0
+	draw_string(font, Vector2(x, yy), "PUBLIC PATIENCE", HORIZONTAL_ALIGNMENT_LEFT, width, 10, MUTED)
+	_draw_meter(Rect2(x, yy + 8, width, 8), d.unrest / 100.0, RED, TEAL)
+	yy += 34.0
+	_button("repair", Rect2(x, yy, width, 34), "REPAIR FAULT  ·  $38–55", d.issue != "", d.issue != "")
+	yy += 41.0
+	_button("inspect", Rect2(x, yy, width, 34), "INSPECT METER  ·  $20", _district_illegal_count(d) > 0)
+	yy += 41.0
+	_button("billing", Rect2(x, yy, width, 34), "VISIT BILLING  ·  $12", _district_unpaid_count(d) > 0)
+	yy += 46.0
+	var reserve_y := mini(yy + 3.0, r.end.y - 34.0)
+	draw_string(font, Vector2(x, reserve_y), "RESERVOIR  " + str(int(reservoir)) + "%", HORIZONTAL_ALIGNMENT_LEFT, width, 10, MUTED)
+	_draw_meter(Rect2(x, reserve_y + 9.0, width, 7), reservoir / 100.0, TEAL, TEAL)
+	if treasury < 120.0 and not loan_used:
+		_button("loan", Rect2(x, r.end.y - 40.0, width, 36), "EMERGENCY LOAN  +$180", false, true)
+
+
+func _draw_portrait_panel(r: Rect2, d: District) -> void:
+	var x := r.position.x + 12.0
+	var width := r.size.x - 24.0
+	var base_y := r.position.y
+	draw_string(font, Vector2(x, base_y + 31), d.title, HORIZONTAL_ALIGNMENT_LEFT, width - 58, 21, INK)
+	_button("close_selection", Rect2(r.end.x - 60, base_y + 8, 48, 48), "×", false)
+	var summary := "Lights on · Water on" if d.has_power and d.has_water else ("One service is off" if d.has_power or d.has_water else "Both services are off")
+	draw_string(font, Vector2(x, base_y + 51), summary, HORIZONTAL_ALIGNMENT_LEFT, width, 12, MUTED)
+	var button_y := base_y + 65.0
+	var gap := 10.0
+	var bw := (width - gap) / 2.0
+	_button("power", Rect2(x, button_y, bw, 54), "POWER  " + ("ON" if d.has_power else "OFF"), d.has_power, not d.has_power)
+	_button("water", Rect2(x + bw + gap, button_y, bw, 54), "WATER  " + ("ON" if d.has_water else "OFF"), d.has_water, not d.has_water)
+	var issue_y := base_y + 141.0
+	var patience := "People are patient" if d.unrest < 35.0 else ("Patience is wearing thin" if d.unrest < 70.0 else "People are getting angry")
+	var issue_text := d.issue if d.issue != "" else patience
+	var illegal_count := _district_illegal_count(d)
+	var unpaid_count := _district_unpaid_count(d)
+	if d.issue == "" and illegal_count > 0:
+		issue_text = str(illegal_count) + " illegal connection(s) need checking"
+	if d.issue == "" and unpaid_count > 0:
+		issue_text = str(unpaid_count) + " house bill(s) are overdue"
+	draw_string(font, Vector2(x, issue_y), issue_text, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if d.issue != "" or d.unrest >= 70 else MUTED)
+	var more_y := base_y + 158.0
+	if d.issue != "":
+		var repair_label := "TEAM WORKING  " + _clock_string(d.repair_left) if d.repairing else ("TEAM READY IN  " + _clock_string(crew_cooldown) if crew_cooldown > 0.0 else "FIX " + d.issue.to_upper() + "  ·  $38–55")
+		_button("repair", Rect2(x, more_y, width, 46), repair_label, true)
+		more_y += 55.0
+	_button("more", Rect2(x, more_y, width, 48), "MORE OPTIONS  " + ("−" if show_more_actions else "+"), false)
+	if show_more_actions:
+		var extra_y := more_y + 54.0
+		var extra_w := (width - gap) / 2.0
+		_button("inspect", Rect2(x, extra_y, extra_w, 48), "INSPECT  ·  $20", illegal_count > 0)
+		_button("billing", Rect2(x + extra_w + gap, extra_y, extra_w, 48), "BILLING  ·  $12", unpaid_count > 0)
+		_button("upgrade_crew", Rect2(x, extra_y + 54.0, width, 48), "UPGRADE CREW  ·  $240  (Lv" + str(crew_level) + ")", false)
+		if treasury < 120.0 and not loan_used:
+			_button("loan", Rect2(x, extra_y + 108.0, width, 48), "EMERGENCY LOAN  +$180", false, true)
+
+
+func _draw_house_panel(r: Rect2, d: District, house: House) -> void:
+	var x := r.position.x + 12.0
+	var width := r.size.x - 24.0
+	draw_string(font, Vector2(x, r.position.y + 29), d.title + " · " + house.label, HORIZONTAL_ALIGNMENT_LEFT, width - 58, 18, INK)
+	_button("close_selection", Rect2(r.end.x - 60, r.position.y + 8, 48, 44), "×", false)
+	var state := "UNPAID · " + str(house.arrears) + " shifts" if house.unpaid else ("ILLEGAL CONNECTION" if house.illegal_hookup else "ACCOUNT IN GOOD STANDING")
+	draw_string(font, Vector2(x, r.position.y + 52), state, HORIZONTAL_ALIGNMENT_LEFT, width, 11, RED if house.unpaid else (AMBER if house.illegal_hookup else MUTED))
+	var button_y := r.position.y + 67.0
+	var gap := 8.0
+	var bw := (width - gap) / 2.0
+	_button("house_power", Rect2(x, button_y, bw, 48), "POWER  " + ("ON" if house.has_power else "CUT"), house.has_power, not house.has_power)
+	_button("house_water", Rect2(x + bw + gap, button_y, bw, 48), "WATER  " + ("ON" if house.has_water else "OFF"), house.has_water, not house.has_water)
+	var more_y := r.position.y + 128.0
+	_button("more", Rect2(x, more_y, width, 44), "ACCOUNT OPTIONS  " + ("−" if show_more_actions else "+"), false)
+	if show_more_actions:
+		_button("house_bill", Rect2(x, more_y + 51, bw, 46), "COLLECT BILL", house.unpaid)
+		_button("house_inspect", Rect2(x + bw + gap, more_y + 51, bw, 46), "INSPECT", house.illegal_hookup)
+		_button("upgrade_crew", Rect2(x, more_y + 104, width, 46), "UPGRADE CREW · Lv" + str(crew_level) + " · $240", false)
+
+
+func _draw_facility_panel(r: Rect2, facility: Facility) -> void:
+	var x := r.position.x + 12.0
+	var width := r.size.x - 24.0
+	var type_label := "WATER PRODUCTION"
+	if facility.kind == "power":
+		var fuel_names := {"hydro": "HYDROELECTRIC", "hfo": "HEAVY FUEL OIL", "diesel": "DIESEL", "solar": "SOLAR"}
+		type_label = str(fuel_names.get(facility.fuel_type, "POWER GENERATION"))
+	draw_string(font, Vector2(x, r.position.y + 29), facility.title, HORIZONTAL_ALIGNMENT_LEFT, width - 58, 18, INK)
+	_button("close_selection", Rect2(r.end.x - 60, r.position.y + 8, 48, 44), "×", false)
+	draw_string(font, Vector2(x, r.position.y + 51), type_label + " · network share " + str(int(facility.capacity)), HORIZONTAL_ALIGNMENT_LEFT, width, 11, MUTED)
+	var status := "REPAIRING · " + _clock_string(facility.repair_left) if facility.repairing else ("OFFLINE · " + facility.fault_name if facility.fault else "OPERATING")
+	draw_string(font, Vector2(x, r.position.y + 75), status, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if facility.fault else TEAL)
+	if facility.fuel_type == "diesel":
+		draw_string(font, Vector2(x, r.position.y + 96), "Shared diesel reserve · " + str(int(diesel_stock)) + " L", HORIZONTAL_ALIGNMENT_LEFT, width, 10, MUTED)
+	var repair_label := "TEAM WORKING  " + _clock_string(facility.repair_left) if facility.repairing else ("TEAM READY IN  " + _clock_string(crew_cooldown) if crew_cooldown > 0.0 else "DISPATCH REPAIR · $65")
+	_button("repair_facility", Rect2(x, r.position.y + 108, width, 48), repair_label, facility.fault, facility.fault and not facility.repairing)
+	if show_more_actions:
+		_button("upgrade_crew", Rect2(x, r.position.y + 218, width, 46), "UPGRADE CREW · Lv" + str(crew_level) + " · $240", false)
+	_button("more", Rect2(x, r.position.y + 164, width, 46), "MORE OPTIONS  " + ("−" if show_more_actions else "+"), false)
+
+
+func _draw_diesel_panel(size: Vector2) -> void:
+	hitboxes.clear()
+	draw_rect(Rect2(Vector2.ZERO, size), Color("#17302b", 0.62))
+	var width := minf(size.x * 0.90, 560.0)
+	var height := minf(size.y * 0.74, 560.0)
+	var card := Rect2((size.x - width) * 0.5, (size.y - height) * 0.5, width, height)
+	_draw_round_rect(card, PANEL, 28)
+	var x := card.position.x + 22.0
+	var content_width := card.size.x - 44.0
+	draw_string(font, Vector2(x, card.position.y + 40), "DIESEL PLAN", HORIZONTAL_ALIGNMENT_LEFT, content_width - 58, 19, INK)
+	_button("fuel_close", Rect2(card.end.x - 58, card.position.y + 10, 46, 46), "×", false)
+	var truck_status := "Tanker on the road · " + _clock_string(diesel_truck_eta) + " · " + str(int(diesel_truck_liters)) + " L" if diesel_truck_in_transit else "No delivery currently on the road"
+	draw_string(font, Vector2(x, card.position.y + 75), truck_status, HORIZONTAL_ALIGNMENT_LEFT, content_width, 11, AMBER if diesel_truck_in_transit else MUTED)
+	draw_string(font, Vector2(x, card.position.y + 106), "RESERVE  " + str(int(diesel_stock)) + " / " + str(int(diesel_tank_capacity)) + " L", HORIZONTAL_ALIGNMENT_LEFT, content_width, 12, INK)
+	_draw_meter(Rect2(x, card.position.y + 116, content_width, 8), diesel_stock / diesel_tank_capacity, AMBER, TEAL)
+	var monthly_y := card.position.y + 158.0
+	draw_string(font, Vector2(x, monthly_y), "MONTHLY PURCHASE TARGET", HORIZONTAL_ALIGNMENT_LEFT, content_width, 10, MUTED)
+	var adjust_y := monthly_y + 12.0
+	_button("fuel_month_down", Rect2(x, adjust_y, 54, 48), "− 500", false)
+	draw_string(font, Vector2(x + 62, adjust_y + 29), str(diesel_monthly_plan) + " L / month", HORIZONTAL_ALIGNMENT_CENTER, content_width - 124, 16, INK)
+	_button("fuel_month_up", Rect2(card.end.x - 76, adjust_y, 54, 48), "+ 500", false)
+	var frequency_y := adjust_y + 72.0
+	draw_string(font, Vector2(x, frequency_y), "DELIVERY FREQUENCY", HORIZONTAL_ALIGNMENT_LEFT, content_width, 10, MUTED)
+	_button("fuel_frequency", Rect2(x, frequency_y + 12, content_width, 48), "Every " + str(diesel_frequency_days) + " days · " + str(int(_diesel_order_size())) + " L/load", false)
+	var auto_y := frequency_y + 76.0
+	_button("fuel_auto", Rect2(x, auto_y, content_width, 48), "AUTOMATIC ORDERS  ·  " + ("ON" if diesel_auto_purchase else "OFF"), diesel_auto_purchase)
+	var order_label := "TANKER EN ROUTE" if diesel_truck_in_transit else "ORDER NEXT LOAD  ·  $" + str(int(_diesel_order_size() * 0.12))
+	_button("fuel_order", Rect2(x, auto_y + 62, content_width, 52), order_label, false, diesel_truck_in_transit)
+	draw_string(font, Vector2(x, card.end.y - 20), "In-game month = one shift · delivery takes 3 in-game days", HORIZONTAL_ALIGNMENT_CENTER, content_width, 10, MUTED)
+
+
+func _draw_rain_popup(size: Vector2) -> void:
+	hitboxes.clear()
+	draw_rect(Rect2(Vector2.ZERO, size), Color("#17302b", 0.60))
+	var width := minf(size.x * 0.86, 540.0)
+	var card := Rect2((size.x - width) * 0.5, size.y * 0.34, width, 330.0)
+	_draw_round_rect(card, PANEL, 28)
+	draw_string(font, Vector2(card.position.x + 20, card.position.y + 42), "RAIN EVENT", HORIZONTAL_ALIGNMENT_CENTER, card.size.x - 40, 12, TEAL)
+	draw_string(font, Vector2(card.position.x + 24, card.position.y + 96), "It’s raining.", HORIZONTAL_ALIGNMENT_CENTER, card.size.x - 48, 24, INK)
+	draw_string(font, Vector2(card.position.x + 32, card.position.y + 132), "We should cut electricity everywhere… right?", HORIZONTAL_ALIGNMENT_CENTER, card.size.x - 64, 12, MUTED)
+	_button("rain_cut_all", Rect2(card.position.x + 22, card.position.y + 172, card.size.x - 44, 58), "CUT POWER EVERYWHERE", false, true)
+	_button("rain_ignore", Rect2(card.position.x + 22, card.position.y + 242, card.size.x - 44, 54), "IGNORE THE WEATHER", false)
+
+
+func _draw_footer(size: Vector2) -> void:
+	if _is_portrait(size):
+		if notice_timer > 0.0 and notice != "":
+			var toast := Rect2(14.0, _panel_rect(size).position.y - 43.0, size.x - 28.0, 34.0)
+			_draw_round_rect(toast, Color("#fffdf7", 0.95), 17)
+			var short_notice := notice.substr(0, 48)
+			draw_string(font, Vector2(toast.position.x + 12, toast.position.y + 22), short_notice, HORIZONTAL_ALIGNMENT_LEFT, toast.size.x - 24, 11, INK)
+		return
+	var y := size.y - 76.0
+	draw_rect(Rect2(0, y, size.x, 76), PANEL)
+	draw_rect(Rect2(0, y, size.x, 1), Color("#dde5da"))
+	var line := notice if notice_timer > 0.0 else "Every 8 seconds, functioning connections bring in tariffs. Repairs cost money. The city does not accept excuses."
+	draw_string(font, Vector2(22, y + 27), line, HORIZONTAL_ALIGNMENT_LEFT, size.x - 44, 14, AMBER if notice_timer > 0.0 else MUTED)
+	draw_string(font, Vector2(22, y + 51), "TIP: Ration service to stay under capacity. Repairs restore broken service; inspections and billing recover lost revenue.", HORIZONTAL_ALIGNMENT_LEFT, size.x - 44, 11, MUTED)
+
+
+func _draw_meter(rect: Rect2, value: float, high: Color, low: Color) -> void:
+	_draw_round_rect(rect, Color("#dce6dc"), rect.size.y * 0.5)
+	var ratio := clampf(value, 0.0, 1.0)
+	var color := low if ratio < 0.72 else high
+	if ratio > 0.0:
+		var fill_width := minf(rect.size.x, maxf(rect.size.y, rect.size.x * ratio))
+		_draw_round_rect(Rect2(rect.position, Vector2(fill_width, rect.size.y)), color, rect.size.y * 0.5)
+
+
+func _draw_game_over(size: Vector2) -> void:
+	draw_rect(Rect2(Vector2.ZERO, size), Color("#17302b", 0.56))
+	var card := Rect2(size.x * 0.08, size.y * 0.30, size.x * 0.84, size.y * 0.40)
+	_draw_round_rect(card, PANEL, 30)
+	draw_string(font, Vector2(0, card.position.y + 56), "SHIFT REPORT", HORIZONTAL_ALIGNMENT_CENTER, size.x, 13, TEAL)
+	var headline := "SHIFT COMPLETE" if time_alive >= 180.0 else "SHIFT ENDED"
+	draw_string(font, Vector2(0, card.position.y + 110), headline, HORIZONTAL_ALIGNMENT_CENTER, size.x, 28, INK)
+	draw_string(font, Vector2(card.position.x + 24, card.position.y + 154), reason.substr(0, 54), HORIZONTAL_ALIGNMENT_CENTER, card.size.x - 48, 13, MUTED)
+	draw_string(font, Vector2(0, card.position.y + 207), "Time " + _clock_string(time_alive) + "     Best " + _clock_string(best_time), HORIZONTAL_ALIGNMENT_CENTER, size.x, 14, INK)
+	var button_rect := Rect2(card.position.x + 22, card.end.y - 76, card.size.x - 44, 56)
+	_button("restart", button_rect, "BACK TO CITY", false)
+
+
+func _clock_string(seconds: float) -> String:
+	var total := int(seconds)
+	return "%02d:%02d" % [total / 60, total % 60]

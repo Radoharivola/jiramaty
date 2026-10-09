@@ -5,10 +5,13 @@ Antananarivo's electricity and water services through a three-minute shift.
 
 ## Play
 
-- Tap a marker or use **+ / −** to move between the regional grid, Antananarivo,
-  and a quartier's house map. Mouse-wheel zoom also works on desktop.
-- Tap a quartier to see its simulated local streets, 25 fictional customer
-  accounts, and the distribution wires connecting those houses.
+- Play in landscape. Tap a map area to zoom into it, drag to pan, and use **+ / −**
+  for zoom steps. Mouse wheel and two-finger pinch zoom smoothly around the
+  pointer or pinch center.
+- Zoom from the regional network into Antananarivo's quartiers, then into a
+  quartier's roads, 25 fictional homes, roadside distribution wires, and poles.
+- Tap a failed pole to inspect it and dispatch the maintenance crew. Its repair
+  timer and the crew's cooldown use the same maintenance system as other faults.
 - Tap a house to inspect its account, cut or restore its electricity and water,
   collect overdue bills, or inspect an illegal hookup.
 - Tap a regional asset to inspect it. Source failures reduce shared network
@@ -29,10 +32,12 @@ progressive map detail. The best shift time is saved locally.
 ## Map and simulation notes
 
 Facility and quartier markers use approximate geographic positions from public
-sources. The regional screen is a stylized network diagram, not an engineering
-map; its lines and the displayed network-share values are gameplay abstractions.
-Quartier outlines, streets, individual house positions, customer accounts, and
-account states are generated for the game and do not identify real households.
+sources. The city silhouette and quartier boundaries are hand-shaped around
+those location anchors and are not authoritative administrative borders. The
+regional screen is a stylized network diagram, not an engineering map; its lines
+and the displayed network-share values are gameplay abstractions. Streets,
+individual house positions, customer accounts, poles, and account states are
+fictional and do not identify real households or utility assets.
 The Antananarivo network includes hydro, HFO, solar, and a clearly labeled
 simulated diesel backup fleet. Diesel procurement is a gameplay abstraction;
 it does not imply that the named HFO facilities burn diesel. JIRAMA's national
@@ -59,4 +64,4 @@ or authoritative.
 
 Open this folder in Godot 4 and run main.tscn (or press F6 while it is open).
 The game uses built-in drawing and input APIs; it has no asset or plugin
-dependencies. Mouse clicks and touchscreen taps are supported.
+dependencies. Mouse, touchscreen, drag, and pinch navigation are supported.

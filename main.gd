@@ -17,6 +17,7 @@ class District:
 	var unpaid := false
 	var arrears := 0
 	var houses: Array = []
+	var poles: Array = []
 	var repair_left := 0.0
 	var repairing := false
 
@@ -24,11 +25,20 @@ class District:
 class House:
 	var label: String
 	var offset := Vector2.ZERO
+	var style := 0
 	var has_power := true
 	var has_water := true
 	var unpaid := false
 	var illegal_hookup := false
 	var arrears := 0
+
+
+class Pole:
+	var offset := Vector2.ZERO
+	var failed := false
+	var repairing := false
+	var repair_left := 0.0
+	var house_indices: Array[int] = []
 
 
 class Facility:
@@ -84,15 +94,21 @@ var districts: Array[District] = []
 var facilities: Array[Facility] = []
 var selected := 0
 var selected_house := -1
+var selected_pole := -1
 var selected_facility := -1
 var zoom_level := 0
 var map_pan := Vector2.ZERO
+var map_scale := 2.2
+var target_map_scale := 2.2
+var map_camera := Vector2(55.0, 0.0)
+var target_map_camera := Vector2(55.0, 0.0)
 var crew_level := 1
 var crew_cooldown := 0.0
 var map_drag_active := false
 var last_drag_position := Vector2.ZERO
 var active_touches: Dictionary = {}
 var pinch_distance := 0.0
+var touch_pan_active := false
 var power_supply := 0.0
 var water_supply := 0.0
 var power_used := 0.0
@@ -161,6 +177,7 @@ func _reset() -> void:
 		d.demand_power = row[3]
 		d.demand_water = row[4]
 		_create_houses(d)
+		_create_poles(d)
 		districts.append(d)
 	facilities.clear()
 	for row in FACILITY_DATA:
@@ -180,14 +197,20 @@ func _reset() -> void:
 		facilities.append(facility)
 	selected = -1
 	selected_house = -1
+	selected_pole = -1
 	selected_facility = -1
 	zoom_level = 0
 	map_pan = Vector2.ZERO
+	map_scale = 2.2
+	target_map_scale = 2.2
+	map_camera = Vector2(55.0, 0.0)
+	target_map_camera = Vector2(55.0, 0.0)
 	crew_level = 1
 	crew_cooldown = 0.0
 	map_drag_active = false
 	active_touches.clear()
 	pinch_distance = 0.0
+	touch_pan_active = false
 	power_supply = 0.0
 	water_supply = 0.0
 	power_used = 0.0
@@ -234,11 +257,22 @@ func _create_houses(d: District) -> void:
 			index += 1
 			var house := House.new()
 			house.label = "House " + ("%02d" % index)
-			house.offset = Vector2((col - 2) * 0.00095 + (0.0003 if row % 2 == 0 else 0.0), (row - 2) * 0.00095)
+			house.offset = Vector2((col - 2) * 0.19 + (0.035 if row % 2 == 0 else 0.0), (row - 2) * 0.17)
+			house.style = (index + row + col) % 4
 			house.unpaid = index in [4, 13, 21]
 			house.arrears = 2 if house.unpaid else 0
 			house.illegal_hookup = index == 17
 			d.houses.append(house)
+
+
+func _create_poles(d: District) -> void:
+	for i in range(7):
+		var pole := Pole.new()
+		pole.offset = Vector2(-0.65 + float(i % 4) * 0.40, 0.35 if i >= 4 else -0.35)
+		for house_index in range(d.houses.size()):
+			if house_index % 7 == i:
+				pole.house_indices.append(house_index)
+		d.poles.append(pole)
 
 
 func _begin_shift() -> void:
@@ -335,7 +369,12 @@ func _update_weather(delta: float) -> void:
 
 
 func _process(delta: float) -> void:
+	var camera_blend := 1.0 - exp(-delta * 9.0)
+	map_scale = lerpf(map_scale, target_map_scale, camera_blend)
+	map_camera = map_camera.lerp(target_map_camera, camera_blend)
+	_update_zoom_level()
 	if not game_started or game_over:
+		queue_redraw()
 		return
 	time_alive += delta
 	event_clock += delta
@@ -386,6 +425,16 @@ func _process(delta: float) -> void:
 						house.has_water = true
 				notice = fixed_issue + " repaired in " + d.title + "."
 				notice_timer = 5.0
+		for pole in d.poles:
+			if pole.repairing:
+				pole.repair_left = maxf(0.0, pole.repair_left - delta)
+				if pole.repair_left <= 0.0:
+					pole.repairing = false
+					pole.failed = false
+					for house_index in pole.house_indices:
+						d.houses[house_index].has_power = d.has_power
+					notice = "Power pole repaired in " + d.title + "."
+					notice_timer = 5.0
 	crew_cooldown = maxf(0.0, crew_cooldown - delta)
 	_recalculate_supply()
 	power_used = 0.0
@@ -469,7 +518,18 @@ func _collect_tariffs() -> void:
 func _spawn_incident() -> void:
 	var d: District = districts[randi_range(0, districts.size() - 1)]
 	var house: House = d.houses[randi_range(0, d.houses.size() - 1)]
-	if not house.unpaid and randi_range(0, 2) == 0:
+	if randi_range(0, 5) == 0:
+		var working_poles: Array[Pole] = []
+		for pole in d.poles:
+			if not pole.failed and not pole.repairing:
+				working_poles.append(pole)
+		if not working_poles.is_empty():
+			var pole: Pole = working_poles[randi_range(0, working_poles.size() - 1)]
+			pole.failed = true
+			for house_index in pole.house_indices:
+				d.houses[house_index].has_power = false
+			notice = "Power pole failure in " + d.title + ". Tap the red pole to dispatch a crew."
+	elif not house.unpaid and randi_range(0, 2) == 0:
 		house.unpaid = true
 		house.arrears = 1
 		notice = d.title + ": " + house.label + " has an overdue bill."
@@ -509,21 +569,58 @@ func _end_game(why: String) -> void:
 
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion:
+		var motion := event as InputEventMouseMotion
+		if map_drag_active and (motion.button_mask & MOUSE_BUTTON_MASK_LEFT) != 0:
+			_pan_map(motion.relative)
+			return
+	if event is InputEventMouseButton and not (event as InputEventMouseButton).pressed:
+		if (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT:
+			map_drag_active = false
+	if event is InputEventScreenDrag:
+		var drag := event as InputEventScreenDrag
+		active_touches[drag.index] = drag.position
+		if active_touches.size() >= 2 and touch_pan_active:
+			var touch_positions: Array = active_touches.values()
+			var distance_now: float = touch_positions[0].distance_to(touch_positions[1])
+			if pinch_distance > 0.0 and distance_now > 0.0:
+				_zoom_at((touch_positions[0] + touch_positions[1]) * 0.5, distance_now / pinch_distance)
+			pinch_distance = distance_now
+		elif active_touches.size() == 1 and touch_pan_active:
+			_pan_map(drag.relative)
+		return
 	var point := Vector2.ZERO
 	var pressed := false
 	if event is InputEventMouseButton:
 		var mouse := event as InputEventMouseButton
 		pressed = mouse.pressed and mouse.button_index == MOUSE_BUTTON_LEFT
 		point = mouse.position
+		if pressed and game_started and not game_over and _map_rect(get_viewport_rect().size).has_point(point):
+			map_drag_active = true
 	elif event is InputEventScreenTouch:
 		var touch := event as InputEventScreenTouch
 		pressed = touch.pressed
 		point = touch.position
+		if touch.pressed:
+			active_touches[touch.index] = touch.position
+			if active_touches.size() == 1:
+				touch_pan_active = _map_rect(get_viewport_rect().size).has_point(touch.position)
+			if active_touches.size() >= 2:
+				var touch_positions: Array = active_touches.values()
+				pinch_distance = touch_positions[0].distance_to(touch_positions[1])
+		else:
+			active_touches.erase(touch.index)
+			if active_touches.size() < 2:
+				pinch_distance = 0.0
+			if active_touches.is_empty():
+				touch_pan_active = false
+		if touch.pressed and active_touches.size() >= 2:
+			return
 	if not pressed:
 		if event is InputEventMouseButton:
 			var wheel := event as InputEventMouseButton
 			if wheel.pressed and wheel.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN] and game_started and not game_over and not diesel_panel_open and not rain_popup_open:
-				_zoom_map(1 if wheel.button_index == MOUSE_BUTTON_WHEEL_UP else -1)
+				_zoom_at(wheel.position, 1.18 if wheel.button_index == MOUSE_BUTTON_WHEEL_UP else 1.0 / 1.18)
 		return
 	if game_started and not game_over and (diesel_panel_open or rain_popup_open):
 		for key in hitboxes:
@@ -564,6 +661,7 @@ func _input(event: InputEvent) -> void:
 			selected_facility = nearest_facility
 			selected = -1
 			selected_house = -1
+			selected_pole = -1
 			show_more_actions = false
 			queue_redraw()
 			return
@@ -571,6 +669,22 @@ func _input(event: InputEvent) -> void:
 			var district := _district_for_zoomed_map()
 			if district >= 0:
 				var d: District = districts[district]
+				var nearest_pole := -1
+				var pole_distance := INF
+				for pole_index in d.poles.size():
+					var pole_screen := _pole_point(d, d.poles[pole_index], map_rect)
+					var dist := pole_screen.distance_to(point)
+					if dist < pole_distance:
+						pole_distance = dist
+						nearest_pole = pole_index
+				if nearest_pole >= 0 and pole_distance < 28.0:
+					selected = district
+					selected_pole = nearest_pole
+					selected_house = -1
+					selected_facility = -1
+					show_more_actions = false
+					queue_redraw()
+					return
 				var nearest_house := -1
 				var house_distance := INF
 				for h in d.houses.size():
@@ -581,6 +695,7 @@ func _input(event: InputEvent) -> void:
 				if nearest_house >= 0 and house_distance < 38.0:
 					selected = district
 					selected_house = nearest_house
+					selected_pole = -1
 					selected_facility = -1
 					show_more_actions = false
 					queue_redraw()
@@ -596,9 +711,14 @@ func _input(event: InputEvent) -> void:
 		if closest >= 0 and distance < (90.0 if zoom_level == 0 else 75.0):
 			selected = closest
 			selected_house = -1
+			selected_pole = -1
 			selected_facility = -1
-			if zoom_level < 2:
-				zoom_level += 1
+			if zoom_level == 0:
+				target_map_camera = Vector2.ZERO
+				target_map_scale = 38.0
+			elif zoom_level == 1:
+				target_map_camera = _district_world(closest)
+				target_map_scale = 350.0
 			show_more_actions = false
 			queue_redraw()
 
@@ -655,8 +775,13 @@ func _handle_button(action: String) -> void:
 		return
 	if action == "zoom_home":
 		zoom_level = 0
+		target_map_scale = 2.2
+		map_scale = 2.2
+		target_map_camera = Vector2(55.0, 0.0)
+		map_camera = target_map_camera
 		selected = -1
 		selected_house = -1
+		selected_pole = -1
 		selected_facility = -1
 		map_pan = Vector2.ZERO
 		queue_redraw()
@@ -668,12 +793,34 @@ func _handle_button(action: String) -> void:
 	if action == "close_selection":
 		selected = -1
 		selected_house = -1
+		selected_pole = -1
 		selected_facility = -1
 		show_more_actions = false
 		queue_redraw()
 		return
 	if selected_facility >= 0:
 		_handle_facility_action(action)
+		return
+	if selected_pole >= 0 and selected >= 0:
+		var d: District = districts[selected]
+		var pole: Pole = d.poles[selected_pole]
+		if action == "pole_repair":
+			if pole.repairing:
+				notice = "Pole crew is working: " + _clock_string(pole.repair_left) + " remaining."
+			elif not pole.failed:
+				notice = "This pole is operational."
+			elif crew_cooldown > 0.0:
+				notice = "Maintenance team returns in " + _clock_string(crew_cooldown) + "."
+			elif treasury < 24.0:
+				notice = "Pole repair needs $24 for parts and transport."
+			else:
+				treasury -= 24.0
+				pole.repairing = true
+				pole.repair_left = _repair_duration() * 0.7
+				crew_cooldown = pole.repair_left + 8.0
+				notice = "Crew dispatched to repair the power pole."
+			notice_timer = 5.0
+			queue_redraw()
 		return
 	if selected_house >= 0 and selected >= 0:
 		_handle_house_action(action)
@@ -766,7 +913,7 @@ func _map_rect(size: Vector2) -> Rect2:
 
 func _panel_rect(size: Vector2) -> Rect2:
 	if _is_portrait(size):
-		var has_selection := selected >= 0 or selected_house >= 0 or selected_facility >= 0
+		var has_selection := selected >= 0 or selected_house >= 0 or selected_pole >= 0 or selected_facility >= 0
 		var panel_height := 136.0 if not has_selection else (380.0 if show_more_actions else 280.0)
 		return Rect2(12.0, size.y - panel_height - 14.0, size.x - 24.0, panel_height)
 	return Rect2(size.x * 0.69, 126.0, size.x * 0.29 - 22.0, size.y - 220.0)
@@ -777,10 +924,7 @@ func _is_portrait(size: Vector2) -> bool:
 
 
 func _district_point(d: District, rect: Rect2) -> Vector2:
-	var world := _geo_to_world(d.latitude, d.longitude)
-	var camera := Vector2(55.0, 0.0) if zoom_level == 0 else (Vector2.ZERO if zoom_level == 1 else _district_world(_district_for_zoomed_map()))
-	var scale := 2.2 if zoom_level == 0 else (24.0 if zoom_level == 1 else 720.0)
-	return rect.get_center() + Vector2((world.x - camera.x) * scale, -(world.y - camera.y) * scale) + map_pan
+	return _world_to_screen(_geo_to_world(d.latitude, d.longitude), rect)
 
 
 func _geo_to_world(latitude: float, longitude: float) -> Vector2:
@@ -796,15 +940,50 @@ func _district_world(index: int) -> Vector2:
 
 func _facility_point(facility: Facility, rect: Rect2) -> Vector2:
 	var world := _geo_to_world(facility.latitude, facility.longitude)
-	var camera := Vector2(55.0, 0.0) if zoom_level == 0 else (Vector2.ZERO if zoom_level == 1 else _district_world(_district_for_zoomed_map()))
-	var scale := 2.2 if zoom_level == 0 else (24.0 if zoom_level == 1 else 720.0)
-	return rect.get_center() + Vector2((world.x - camera.x) * scale, -(world.y - camera.y) * scale) + map_pan + facility.display_offset
+	return _world_to_screen(world, rect) + facility.display_offset
 
 
 func _house_point(d: District, house: House, rect: Rect2) -> Vector2:
-	var center := _district_world(_district_for_zoomed_map())
-	var offset_km := Vector2(house.offset.x * 105.3, -house.offset.y * 111.32)
-	return rect.get_center() + Vector2((center.x - _district_world(_district_for_zoomed_map()).x) * 720.0, -(center.y - _district_world(_district_for_zoomed_map()).y) * 720.0) + offset_km * 720.0 + map_pan
+	var district_index := districts.find(d)
+	var world := _district_world(district_index) + house.offset
+	return _world_to_screen(world, rect)
+
+
+func _pole_point(d: District, pole: Pole, rect: Rect2) -> Vector2:
+	return _world_to_screen(_district_world(districts.find(d)) + pole.offset, rect)
+
+
+func _world_to_screen(world: Vector2, rect: Rect2) -> Vector2:
+	return rect.get_center() + Vector2((world.x - map_camera.x) * map_scale, -(world.y - map_camera.y) * map_scale) + map_pan
+
+
+func _screen_to_world(point: Vector2, rect: Rect2) -> Vector2:
+	var relative := point - rect.get_center() - map_pan
+	return map_camera + Vector2(relative.x / maxf(map_scale, 0.001), -relative.y / maxf(map_scale, 0.001))
+
+
+func _pan_map(screen_delta: Vector2) -> void:
+	if not game_started or game_over or diesel_panel_open or rain_popup_open:
+		return
+	target_map_camera.x -= screen_delta.x / maxf(map_scale, 0.001)
+	target_map_camera.y += screen_delta.y / maxf(map_scale, 0.001)
+	queue_redraw()
+
+
+func _zoom_at(point: Vector2, factor: float) -> void:
+	var rect := _map_rect(get_viewport_rect().size)
+	if not rect.has_point(point):
+		point = rect.get_center()
+	var anchor := _screen_to_world(point, rect)
+	target_map_scale = clampf(target_map_scale * factor, 2.2, 760.0)
+	var relative := point - rect.get_center() - map_pan
+	target_map_camera = anchor - Vector2(relative.x / target_map_scale, -relative.y / target_map_scale)
+	_update_zoom_level()
+	queue_redraw()
+
+
+func _update_zoom_level() -> void:
+	zoom_level = 0 if map_scale < 10.0 else (1 if map_scale < 150.0 else 2)
 
 
 func _district_for_zoomed_map() -> int:
@@ -827,14 +1006,23 @@ func _district_illegal_count(d: District) -> int:
 	return count
 
 
+func _district_failed_pole_count(d: District) -> int:
+	var count := 0
+	for pole in d.poles:
+		if pole.failed:
+			count += 1
+	return count
+
+
 func _zoom_map(amount: int) -> void:
-	zoom_level = clampi(zoom_level + amount, 0, 2)
-	if zoom_level == 0:
+	_zoom_at(_map_rect(get_viewport_rect().size).get_center(), 1.8 if amount > 0 else 1.0 / 1.8)
+	if target_map_scale <= 2.21:
 		selected = -1
 		selected_house = -1
+		selected_pole = -1
 		selected_facility = -1
-	map_pan = Vector2.ZERO
-	queue_redraw()
+		target_map_camera = Vector2(55.0, 0.0)
+		map_camera = target_map_camera
 
 
 func _repair_duration() -> float:
@@ -1005,9 +1193,10 @@ func _draw_help(size: Vector2) -> void:
 	draw_string(font, Vector2(card.position.x + 22, card.position.y + 42), "A SIMPLE FIRST SHIFT", HORIZONTAL_ALIGNMENT_LEFT, card.size.x - 44, 20, INK)
 	var copy_y := card.position.y + 86
 	var instructions := [
-		"1. Tap a neighborhood on the map.",
-		"2. Use Power and Water to balance demand.",
-		"3. Fix faults when they appear. Keep patience up.",
+		"1. Tap a quartier, then zoom in to inspect homes and poles.",
+		"2. Drag to pan; pinch or use + / − to zoom smoothly.",
+		"3. Manage power, water, fuel, repairs, and overdue bills.",
+		"4. Keep public patience and the treasury above zero.",
 	]
 	for line in instructions:
 		draw_string(font, Vector2(card.position.x + 22, copy_y), line, HORIZONTAL_ALIGNMENT_LEFT, card.size.x - 44, 14, MUTED)
@@ -1100,10 +1289,7 @@ func _draw_regional_map(r: Rect2) -> void:
 	draw_line(_facility_point(facilities[6], r), tana, Color("#e9a056", 0.50), 2.0)
 	draw_line(_facility_point(facilities[7], r), tana, Color("#6d88b6", 0.60), 2.0)
 	draw_line(_facility_point(facilities[8], r), tana, Color("#d7a648", 0.62), 2.0)
-	for d in districts:
-		draw_circle(_district_point(d, r), 12.0, Color("#24836d", 0.24))
-	draw_circle(tana, 38.0, Color("#24836d", 0.06))
-	draw_arc(tana, 38.0, 0, TAU, 64, Color("#24836d", 0.42), 2.0)
+	_draw_city_boundary(r, Color("#24836d", 0.07), Color("#24836d", 0.42), 2.0)
 	draw_circle(tana, 25.0, Color("#ffffff", 0.74))
 	draw_circle(tana, 18.0, TEAL)
 	draw_string(font, tana + Vector2(-75, 42), "ANTANANARIVO · tap to zoom", HORIZONTAL_ALIGNMENT_CENTER, 150, 11, INK)
@@ -1112,28 +1298,28 @@ func _draw_regional_map(r: Rect2) -> void:
 
 
 func _draw_city_map(r: Rect2) -> void:
-	for i in range(1, 7):
-		var x := r.position.x + r.size.x * i / 7.0
-		var y := r.position.y + r.size.y * i / 7.0
-		draw_line(Vector2(x, r.position.y), Vector2(x + 16, r.end.y), Color("#fffdf7", 0.85), 7.0)
-		draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y + 9), Color("#fffdf7", 0.85), 7.0)
+	_draw_city_boundary(r, Color("#d2e0ca", 0.75), Color("#82a990", 0.8), 2.0)
+	# Main roads bend between actual quartier anchors rather than forming a generic grid.
+	_draw_road_world([_district_world(1), _district_world(1) + Vector2(-1.2, -0.9), _district_world(0) + Vector2(1.2, 0.2), _district_world(4), _district_world(2), _district_world(3)], r, 10.0)
+	_draw_road_world([_district_world(1) + Vector2(0.1, -0.8), _district_world(0) + Vector2(0.6, -1.0), _district_world(5) + Vector2(-0.5, 1.3), _district_world(5)], r, 7.0)
+	_draw_road_world([_district_world(4), _district_world(4) + Vector2(0.4, -0.7), _district_world(5) + Vector2(-0.4, 0.6)], r, 6.0)
 	for i in districts.size():
 		var d: District = districts[i]
 		var center := _district_point(d, r)
-		var radius := 26.0 if i == selected else 20.0
-		var fill := Color("#c9dfce") if d.has_power and d.has_water else Color("#f0d8b6")
+		var fill := Color("#c9dfce", 0.60) if d.has_power and d.has_water else Color("#f0d8b6", 0.62)
 		if d.issue != "" or d.unrest > 65.0:
-			fill = Color("#f1c0b7")
-		draw_circle(center, radius + 8.0, Color("#fffdf7", 0.85))
-		draw_circle(center, radius, fill)
-		draw_arc(center, radius, 0, TAU, 36, TEAL, 2.0)
-		draw_string(font, center + Vector2(-56, 39), d.title, HORIZONTAL_ALIGNMENT_CENTER, 112, 11, INK)
+			fill = Color("#f1c0b7", 0.68)
+		_draw_quartier_boundary(i, r, fill, TEAL if i == selected else Color("#fffdf7", 0.95), 2.0 if i == selected else 1.2)
+		draw_string(font, center + Vector2(-66, 5), d.title, HORIZONTAL_ALIGNMENT_CENTER, 132, 11, INK)
 		var alert_count := 0
 		for house in d.houses:
 			if house.unpaid or house.illegal_hookup:
 				alert_count += 1
-		if d.issue != "" or alert_count > 0:
-			draw_circle(center + Vector2(16, -15), 7.0, RED if d.issue != "" else AMBER)
+		var failed_pole := false
+		for pole in d.poles:
+			failed_pole = failed_pole or pole.failed
+		if d.issue != "" or alert_count > 0 or failed_pole:
+			draw_circle(center + Vector2(16, -15), 7.0, RED if d.issue != "" or failed_pole else AMBER)
 	for facility in facilities:
 		if absf(facility.latitude - MAP_CENTER_LAT) < 0.20 and absf(facility.longitude - MAP_CENTER_LON) < 0.22:
 			_draw_facility_marker(facility, r, 1)
@@ -1144,34 +1330,119 @@ func _draw_quartier_map(r: Rect2) -> void:
 	if d_index < 0:
 		return
 	var d: District = districts[d_index]
-	var center := r.get_center() + map_pan
-	var boundary_radius := minf(r.size.x, r.size.y) * 0.40
-	draw_circle(center, boundary_radius, Color("#b8d5c1", 0.27))
-	draw_arc(center, boundary_radius, 0, TAU, 64, Color("#78a98f"), 2.0)
-	for i in range(-3, 4):
-		var x := center.x + i * 53.0
-		var y := center.y + i * 46.0
-		draw_line(Vector2(x, r.position.y + 48), Vector2(x + 25, r.end.y - 4), Color("#fffdf7", 0.95), 5.0)
-		draw_line(Vector2(r.position.x, y), Vector2(r.end.x, y + 14), Color("#fffdf7", 0.95), 5.0)
-	var transformer := center + Vector2(-20, 14)
+	var district_world := _district_world(d_index)
+	var local_boundary := [Vector2(-0.95,-0.55), Vector2(-0.66,-0.83), Vector2(-0.18,-0.80), Vector2(0.22,-0.67), Vector2(0.72,-0.69), Vector2(0.90,-0.38), Vector2(0.83,0.18), Vector2(0.98,0.53), Vector2(0.60,0.78), Vector2(0.12,0.70), Vector2(-0.27,0.84), Vector2(-0.73,0.66), Vector2(-0.88,0.24)]
+	_draw_local_polygon(district_world, local_boundary, r, Color("#c7ddca", 0.55), Color("#79a58c", 0.9), 2.0)
+	# Streets and service lines follow the uneven residential blocks.
+	var local_roads := [
+		[Vector2(-1.0,-0.48), Vector2(-0.58,-0.38), Vector2(-0.12,-0.42), Vector2(0.34,-0.31), Vector2(0.88,-0.38)],
+		[Vector2(-0.92,0.05), Vector2(-0.48,0.13), Vector2(-0.04,0.06), Vector2(0.44,0.16), Vector2(0.96,0.08)],
+		[Vector2(-0.62,-0.86), Vector2(-0.55,-0.45), Vector2(-0.50,-0.02), Vector2(-0.43,0.42), Vector2(-0.35,0.82)],
+		[Vector2(0.42,-0.79), Vector2(0.36,-0.42), Vector2(0.43,-0.02), Vector2(0.50,0.35), Vector2(0.58,0.80)]
+	]
+	for road in local_roads:
+		_draw_road_local(district_world, road, r, 5.0)
+	# Roadside electrical conductors, with poles at the junctions.
+	var lower_wire := PackedVector2Array()
+	var upper_wire := PackedVector2Array()
+	for pole_index in d.poles.size():
+		if pole_index < 4:
+			lower_wire.append(_world_to_screen(district_world + d.poles[pole_index].offset, r))
+		else:
+			upper_wire.append(_world_to_screen(district_world + d.poles[pole_index].offset, r))
+	if lower_wire.size() > 1:
+		draw_polyline(lower_wire, Color("#348b70", 0.72), 2.0, true)
+	if upper_wire.size() > 1:
+		draw_polyline(upper_wire, Color("#348b70", 0.72), 2.0, true)
 	for house in d.houses:
 		var p := _house_point(d, house, r)
-		draw_line(transformer, p, Color("#24836d", 0.38), 1.2)
-		draw_circle(p, 12.0, Color("#fffdf7"))
-		var house_color := TEAL if house.has_power else Color("#9b9c91")
-		if house.unpaid:
-			house_color = RED
-		elif house.illegal_hookup:
-			house_color = AMBER
-		draw_rect(Rect2(p - Vector2(7, 7), Vector2(14, 14)), house_color)
-		draw_string(font, p + Vector2(9, 3), house.label.replace("House ", "H"), HORIZONTAL_ALIGNMENT_LEFT, 30, 8, INK)
-		draw_circle(p + Vector2(8, -8), 3.0, Color("#4682bd") if house.has_water else Color("#aeb7b0"))
+		_draw_house_icon(p, house)
+		draw_string(font, p + Vector2(15, 4), house.label.replace("House ", "H"), HORIZONTAL_ALIGNMENT_LEFT, 26, 8, INK)
 		if selected_house >= 0 and d.houses[selected_house] == house:
-			draw_arc(p, 15.0, 0, TAU, 24, INK, 2.0)
-	var transformer_color := Color("#e9a056") if d.has_power else RED
-	draw_rect(Rect2(transformer - Vector2(9, 9), Vector2(18, 18)), transformer_color)
+			draw_arc(p, 22.0, 0, TAU, 24, INK, 2.0)
+	for pole_index in d.poles.size():
+		_draw_pole_icon(_pole_point(d, d.poles[pole_index], r), d.poles[pole_index], pole_index == selected_pole)
 	draw_string(font, r.position + Vector2(14, 48), d.title + " · " + str(d.houses.size()) + " accounts", HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 28, 12, INK)
-	draw_string(font, r.position + Vector2(14, 66), "Tap a house. Red = overdue bill · amber = illegal hookup", HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 28, 10, MUTED)
+	draw_string(font, r.position + Vector2(14, 66), "Houses · poles · roadside wires   |   red = fault / overdue", HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 28, 10, MUTED)
+
+
+func _draw_city_boundary(rect: Rect2, fill: Color, outline: Color, width: float) -> void:
+	var outline_offsets := [Vector2(-6.9,-2.0), Vector2(-6.0,-4.0), Vector2(-3.9,-4.6), Vector2(-1.6,-4.0), Vector2(0.6,-3.5), Vector2(2.8,-2.4), Vector2(3.5,-0.7), Vector2(2.8,1.4), Vector2(1.5,3.2), Vector2(0.2,5.4), Vector2(-0.7,6.5), Vector2(-2.5,6.2), Vector2(-3.8,5.1), Vector2(-5.7,3.2), Vector2(-6.8,1.0)]
+	_draw_local_polygon(Vector2.ZERO, outline_offsets, rect, fill, outline, width)
+
+
+func _draw_quartier_boundary(index: int, rect: Rect2, fill: Color, outline: Color, width: float) -> void:
+	var center := _district_world(index)
+	var size := 0.9 + float(index % 3) * 0.14
+	var points := [Vector2(-1.2,-0.4), Vector2(-0.8,-0.95), Vector2(-0.15,-0.85), Vector2(0.35,-1.02), Vector2(0.98,-0.68), Vector2(1.12,-0.12), Vector2(0.84,0.52), Vector2(0.35,0.96), Vector2(-0.22,0.78), Vector2(-0.76,0.92), Vector2(-1.08,0.42)]
+	var scaled_points: Array[Vector2] = []
+	for point in points:
+		scaled_points.append(point * size)
+	_draw_local_polygon(center, scaled_points, rect, fill, outline, width)
+
+
+func _draw_local_polygon(center: Vector2, offsets: Array, rect: Rect2, fill: Color, outline: Color, width: float) -> void:
+	var points := PackedVector2Array()
+	for offset in offsets:
+		points.append(_world_to_screen(center + offset, rect))
+	if points.size() >= 3:
+		draw_colored_polygon(points, fill)
+		var closed := points.duplicate()
+		closed.append(points[0])
+		draw_polyline(closed, outline, width, true)
+
+
+func _draw_road_world(points: Array, rect: Rect2, width: float) -> void:
+	var screen_points := PackedVector2Array()
+	for point in points:
+		screen_points.append(_world_to_screen(point, rect))
+	if screen_points.size() < 2:
+		return
+	draw_polyline(screen_points, Color("#a08d6d", 0.82), width + 3.0, true)
+	draw_polyline(screen_points, Color("#f4f0e3", 0.96), width, true)
+
+
+func _draw_road_local(center: Vector2, offsets: Array, rect: Rect2, width: float) -> void:
+	var world_points: Array[Vector2] = []
+	for offset in offsets:
+		world_points.append(center + offset)
+	_draw_road_world(world_points, rect, width)
+
+
+func _draw_house_icon(point: Vector2, house: House) -> void:
+	var wall_colors := [Color("#f7ead0"), Color("#e8dfc7"), Color("#d9e4dc"), Color("#f2dfc6")]
+	var roof_colors := [Color("#b96c58"), Color("#687c79"), Color("#91704f"), Color("#c28a50")]
+	var wall: Color = wall_colors[house.style]
+	var roof: Color = roof_colors[house.style]
+	if house.unpaid:
+		roof = RED
+	elif house.illegal_hookup:
+		roof = AMBER
+	var building := Rect2(point.x - 11.0, point.y - 2.0, 22.0, 16.0)
+	if house.style == 2:
+		building = Rect2(point.x - 9.0, point.y - 10.0, 18.0, 24.0)
+	draw_rect(building.grow(2), Color("#fffdf7"))
+	draw_rect(building, wall)
+	if house.style == 2:
+		draw_rect(Rect2(point.x - 11, point.y - 14, 22, 5), roof)
+	else:
+		var roof_shape := PackedVector2Array([Vector2(point.x - 14, point.y - 1), Vector2(point.x, point.y - 12), Vector2(point.x + 14, point.y - 1)])
+		draw_colored_polygon(roof_shape, roof)
+	var window_color := Color("#ffd77a") if house.has_power else Color("#84938a")
+	draw_rect(Rect2(point.x - 7, point.y + 2, 5, 5), window_color)
+	draw_rect(Rect2(point.x + 2, point.y + 2, 5, 5), window_color)
+	draw_rect(Rect2(point.x - 1.5, point.y + 7, 4, 7), Color("#8a6651"))
+	draw_circle(point + Vector2(11, -9), 3.2, Color("#4682bd") if house.has_water else Color("#aeb7b0"))
+
+
+func _draw_pole_icon(point: Vector2, pole: Pole, is_selected: bool) -> void:
+	var tint := RED if pole.failed else (AMBER if pole.repairing else Color("#56645c"))
+	draw_line(point + Vector2(0, -8), point + Vector2(0, 8), Color("#fffdf7"), 5.0)
+	draw_line(point + Vector2(0, -8), point + Vector2(0, 8), tint, 2.0)
+	draw_line(point + Vector2(-5, -6), point + Vector2(5, -6), tint, 2.0)
+	if is_selected or pole.failed:
+		draw_circle(point + Vector2(8, -7), 7.0, Color("#fffdf7", 0.9))
+		draw_circle(point + Vector2(8, -7), 4.0, tint)
 
 
 func _draw_facility_marker(facility: Facility, r: Rect2, level: int) -> void:
@@ -1206,6 +1477,9 @@ func _draw_panel(size: Vector2) -> void:
 	if selected_facility >= 0:
 		_draw_facility_panel(r, facilities[selected_facility])
 		return
+	if selected_pole >= 0 and selected >= 0:
+		_draw_pole_panel(r, districts[selected], districts[selected].poles[selected_pole])
+		return
 	if selected_house >= 0 and selected >= 0:
 		_draw_house_panel(r, districts[selected], districts[selected].houses[selected_house])
 		return
@@ -1221,6 +1495,16 @@ func _draw_panel(size: Vector2) -> void:
 		_draw_portrait_panel(r, d)
 	else:
 		_draw_desktop_panel(r, d)
+
+
+func _draw_pole_panel(r: Rect2, d: District, pole: Pole) -> void:
+	var x := r.position.x + 18.0
+	var width := r.size.x - 36.0
+	draw_string(font, Vector2(x, r.position.y + 28), "DISTRIBUTION POLE", HORIZONTAL_ALIGNMENT_LEFT, width, 11, TEAL)
+	draw_string(font, Vector2(x, r.position.y + 60), d.title + " · Pole " + str(selected_pole + 1), HORIZONTAL_ALIGNMENT_LEFT, width, 20, INK)
+	var state := "Crew repairing · " + _clock_string(pole.repair_left) if pole.repairing else ("Failed · " + str(pole.house_indices.size()) + " homes affected" if pole.failed else "Operational")
+	draw_string(font, Vector2(x, r.position.y + 91), state, HORIZONTAL_ALIGNMENT_LEFT, width, 13, RED if pole.failed else MUTED)
+	_button("pole_repair", Rect2(x, r.position.y + 112, width, 42), "REPAIR POLE  ·  $24", pole.failed and not pole.repairing, pole.failed and not pole.repairing)
 
 
 func _draw_desktop_panel(r: Rect2, d: District) -> void:
@@ -1241,11 +1525,14 @@ func _draw_desktop_panel(r: Rect2, d: District) -> void:
 	var issue_text := d.issue if d.issue != "" else "No active infrastructure fault"
 	var illegal_count := _district_illegal_count(d)
 	var unpaid_count := _district_unpaid_count(d)
+	var failed_poles := _district_failed_pole_count(d)
 	if illegal_count > 0:
 		issue_text += "  ·  illegal hookups " + str(illegal_count)
 	if unpaid_count > 0:
 		issue_text += "  ·  overdue accounts " + str(unpaid_count)
-	draw_string(font, Vector2(x, yy), issue_text, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if d.issue != "" else (AMBER if illegal_count > 0 or unpaid_count > 0 else INK))
+	if failed_poles > 0:
+		issue_text += "  ·  failed poles " + str(failed_poles)
+	draw_string(font, Vector2(x, yy), issue_text, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if d.issue != "" or failed_poles > 0 else (AMBER if illegal_count > 0 or unpaid_count > 0 else INK))
 	yy += 27.0
 	draw_string(font, Vector2(x, yy), "PUBLIC PATIENCE", HORIZONTAL_ALIGNMENT_LEFT, width, 10, MUTED)
 	_draw_meter(Rect2(x, yy + 8, width, 8), d.unrest / 100.0, RED, TEAL)
@@ -1281,11 +1568,14 @@ func _draw_portrait_panel(r: Rect2, d: District) -> void:
 	var issue_text := d.issue if d.issue != "" else patience
 	var illegal_count := _district_illegal_count(d)
 	var unpaid_count := _district_unpaid_count(d)
+	var failed_poles := _district_failed_pole_count(d)
 	if d.issue == "" and illegal_count > 0:
 		issue_text = str(illegal_count) + " illegal connection(s) need checking"
 	if d.issue == "" and unpaid_count > 0:
 		issue_text = str(unpaid_count) + " house bill(s) are overdue"
-	draw_string(font, Vector2(x, issue_y), issue_text, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if d.issue != "" or d.unrest >= 70 else MUTED)
+	if d.issue == "" and failed_poles > 0:
+		issue_text = str(failed_poles) + " power pole(s) have failed"
+	draw_string(font, Vector2(x, issue_y), issue_text, HORIZONTAL_ALIGNMENT_LEFT, width, 12, RED if d.issue != "" or failed_poles > 0 or d.unrest >= 70 else MUTED)
 	var more_y := base_y + 158.0
 	if d.issue != "":
 		var repair_label := "TEAM WORKING  " + _clock_string(d.repair_left) if d.repairing else ("TEAM READY IN  " + _clock_string(crew_cooldown) if crew_cooldown > 0.0 else "FIX " + d.issue.to_upper() + "  ·  $38–55")
@@ -1400,7 +1690,7 @@ func _draw_footer(size: Vector2) -> void:
 	draw_rect(Rect2(0, y, size.x, 1), Color("#dde5da"))
 	var line := notice if notice_timer > 0.0 else "Every 8 seconds, functioning connections bring in tariffs. Repairs cost money. The city does not accept excuses."
 	draw_string(font, Vector2(22, y + 27), line, HORIZONTAL_ALIGNMENT_LEFT, size.x - 44, 14, AMBER if notice_timer > 0.0 else MUTED)
-	draw_string(font, Vector2(22, y + 51), "TIP: Ration service to stay under capacity. Repairs restore broken service; inspections and billing recover lost revenue.", HORIZONTAL_ALIGNMENT_LEFT, size.x - 44, 11, MUTED)
+	draw_string(font, Vector2(22, y + 51), "MAP: drag to pan · pinch / wheel to zoom · tap quartiers, homes, poles, and facilities.", HORIZONTAL_ALIGNMENT_LEFT, size.x - 44, 11, MUTED)
 
 
 func _draw_meter(rect: Rect2, value: float, high: Color, low: Color) -> void:
